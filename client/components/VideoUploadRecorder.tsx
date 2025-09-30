@@ -29,6 +29,7 @@ import {
   Clock,
   HardDrive,
   X,
+  SwitchCamera,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -55,7 +56,7 @@ interface VideoUploadRecorderProps {
 }
 
 const DEFAULT_CONFIG: VideoUploadConfig = {
-  maxSizeMB: 100,
+  maxSizeMB: 1000,
   maxDurationMinutes: 5,
   allowedFormats: ["video/mp4", "video/webm", "video/quicktime"],
   chunkSizeMB: 10,
@@ -77,6 +78,7 @@ export default function VideoUploadRecorder({
   const [cameraPermission, setCameraPermission] = useState<boolean | null>(
     null,
   );
+  const [facingMode, setFacingMode] = useState<"user" | "environment">("user"); // user = front, environment = back
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const videoStreamRef = useRef<MediaStream | null>(null);
@@ -209,7 +211,7 @@ export default function VideoUploadRecorder({
         video: {
           width: { ideal: 1280 },
           height: { ideal: 720 },
-          facingMode: "user",
+          facingMode: facingMode, // Use dynamic facing mode
         },
         audio: true,
       });
@@ -220,11 +222,89 @@ export default function VideoUploadRecorder({
       if (videoPreviewRef.current) {
         videoPreviewRef.current.srcObject = stream;
       }
-    } catch (error) {
+    } catch (error: any) {
       setCameraPermission(false);
+      let errorMessage = "Camera access denied. Please allow camera permissions and try again.";
+      
+      if (error.name === "NotAllowedError") {
+        errorMessage = "Camera access denied. Click the camera icon in your browser's address bar to allow access.";
+      } else if (error.name === "NotFoundError") {
+        errorMessage = "No camera found. Please connect a camera and try again.";
+      } else if (error.name === "NotReadableError") {
+        errorMessage = "Camera is already in use by another application. Please close other apps using the camera.";
+      } else if (error.name === "OverconstrainedError") {
+        errorMessage = "Camera doesn't support the requested settings. Trying with default settings...";
+        // Try again with minimal constraints
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true,
+          });
+          videoStreamRef.current = stream;
+          setCameraPermission(true);
+          if (videoPreviewRef.current) {
+            videoPreviewRef.current.srcObject = stream;
+          }
+          return;
+        } catch (fallbackError) {
+          errorMessage = "Camera not available. Please check your camera settings.";
+        }
+      }
+      
+      setError(errorMessage);
+    }
+  };
+
+  // Switch between front and back camera
+  const switchCamera = async () => {
+    try {
+      setError("");
+      
+      // Stop current stream
+      if (videoStreamRef.current) {
+        videoStreamRef.current.getTracks().forEach((track) => track.stop());
+      }
+
+      // Toggle facing mode
+      const newFacingMode = facingMode === "user" ? "environment" : "user";
+      setFacingMode(newFacingMode);
+
+      // Start new stream with new facing mode
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: newFacingMode,
+        },
+        audio: true,
+      });
+
+      videoStreamRef.current = stream;
+
+      if (videoPreviewRef.current) {
+        videoPreviewRef.current.srcObject = stream;
+      }
+    } catch (error) {
       setError(
-        "Camera access denied. Please allow camera permissions and try again.",
+        "Failed to switch camera. This device may not have multiple cameras.",
       );
+      // If switching fails, try to restart with original facing mode
+      try {
+        const fallbackStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            facingMode: facingMode,
+          },
+          audio: true,
+        });
+        videoStreamRef.current = fallbackStream;
+        if (videoPreviewRef.current) {
+          videoPreviewRef.current.srcObject = fallbackStream;
+        }
+      } catch (fallbackError) {
+        setError("Camera access failed. Please refresh and try again.");
+      }
     }
   };
 
@@ -537,6 +617,20 @@ export default function VideoUploadRecorder({
                       </div>
 
                       <div className="flex items-center justify-center gap-2">
+                        {/* Camera Switch Button */}
+                        {videoStreamRef.current && !isRecording && (
+                          <Button
+                            type="button"
+                            onClick={switchCamera}
+                            disabled={disabled}
+                            variant="outline"
+                            size="sm"
+                            title={`Switch to ${facingMode === "user" ? "back" : "front"} camera`}
+                          >
+                            <SwitchCamera className="w-4 h-4" />
+                          </Button>
+                        )}
+                        
                         {isProcessing ? (
                           <Button type="button" disabled>
                             <div className="w-4 h-4 mr-2 border-2 border-white border-t-transparent rounded-full animate-spin" />

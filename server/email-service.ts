@@ -1,195 +1,144 @@
-import nodemailer from "nodemailer";
-import { Report } from "@shared/api";
-
-// Email configuration - these should be environment variables in production
-const EMAIL_CONFIG = {
-  service: "gmail",
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
-  auth: {
-    user: process.env.EMAIL_USER || "whistle.git@gmail.com", // Your email
-    pass: process.env.EMAIL_APP_PASSWORD, // App-specific password required
-  },
-};
-
-// Create transporter
-const transporter = nodemailer.createTransport(EMAIL_CONFIG);
+import nodemailer from 'nodemailer';
+import { IAlert } from '../shared/models/Alert';
+import { IReport } from '../shared/models/report';
 
 /**
- * Send actual email notification for urgent reports
+ * Enhanced Email Service for Whistle App
+ * Sends alert notifications for urgent/emergency reports
  */
-export async function sendEmailAlert(report: Report): Promise<boolean> {
-  try {
-    // Check if email is configured
-    if (!EMAIL_CONFIG.auth.pass) {
-      console.warn(
-        "❌ Email service not configured - EMAIL_APP_PASSWORD missing",
-      );
-      console.log(
-        "📧 Would send email to: ritisulo@gmail.com for report:",
-        report.id,
-      );
+
+interface EmailConfig {
+  host: string;
+  port: number;
+  secure: boolean;
+  auth: {
+    user: string;
+    pass: string;
+  };
+}
+
+class EmailService {
+  private transporter: nodemailer.Transporter | null = null;
+  private isConfigured: boolean = false;
+
+  constructor() {
+    this.initializeTransporter();
+  }
+
+  private initializeTransporter() {
+    const {
+      SMTP_HOST,
+      SMTP_PORT,
+      SMTP_USER,
+      SMTP_PASS
+    } = process.env;
+
+    if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) {
+      console.warn('✉️ Email service not configured. Missing SMTP environment variables.');
+      return;
+    }
+
+    const emailConfig: EmailConfig = {
+      host: SMTP_HOST,
+      port: parseInt(SMTP_PORT),
+      secure: parseInt(SMTP_PORT) === 465,
+      auth: {
+        user: SMTP_USER,
+        pass: SMTP_PASS
+      }
+    };
+
+    this.transporter = nodemailer.createTransport(emailConfig);
+    this.isConfigured = true;
+
+    console.log('✉️ Email service initialized');
+  }
+
+  async sendAlertNotification(alert: IAlert, report?: IReport): Promise<boolean> {
+    if (!this.isConfigured || !this.transporter) {
+      console.warn('Email service not configured. Skipping notification.');
       return false;
     }
 
-    const emailOptions = {
-      from: {
-        name: "Whistle Security System",
-        address: EMAIL_CONFIG.auth.user,
-      },
-      to: "ritisulo@gmail.com",
-      subject: `🚨 URGENT: New ${report.category} Report - ${report.id}`,
-      html: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <meta charset="utf-8">
-          <title>Urgent Harassment Report</title>
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-            .header { background: linear-gradient(135deg, #3b82f6 0%, #1e40af 100%); color: white; padding: 20px; text-align: center; }
-            .content { padding: 20px; background: #f9fafb; }
-            .urgent { background: #fee2e2; border-left: 4px solid #dc2626; padding: 15px; margin: 15px 0; }
-            .details { background: white; padding: 20px; border-radius: 8px; margin: 15px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-            .button { display: inline-block; background: #3b82f6; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; margin: 20px 0; }
-            .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 12px; }
-          </style>
-        </head>
-        <body>
-          <div class="header">
-            <h1>🚨 URGENT HARASSMENT REPORT</h1>
-            <p>Immediate Administrative Action Required</p>
+    try {
+      const adminEmail = process.env.ADMIN_EMAIL;
+      if (!adminEmail) {
+        console.error('ADMIN_EMAIL not configured.');
+        return false;
+      }
+
+      const fromEmail = process.env.FROM_EMAIL || process.env.SMTP_USER;
+      const fromName = process.env.FROM_NAME || 'Whistle Security';
+      
+      const urgencyBadge = alert.alertType === 'emergency' ? 'EMERGENCY' : 'URGENT';
+      const urgencyColor = alert.alertType === 'emergency' ? '#dc3545' : '#fd7e14';
+
+      const htmlContent = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <div style="background: ${urgencyColor}; color: white; padding: 20px; text-align: center;">
+            <h1>🚨 Security Alert</h1>
+            <p>Immediate Attention Required</p>
           </div>
           
-          <div class="content">
-            <div class="urgent">
-              <strong>⚠️ This is an urgent report requiring immediate attention</strong>
+          <div style="padding: 30px; background: white;">
+            <div style="text-align: center; margin-bottom: 20px;">
+              <span style="background: ${urgencyColor}; color: white; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: bold;">
+                ${urgencyBadge} ALERT
+              </span>
             </div>
             
-            <div class="details">
-              <h3>Report Details</h3>
-              <ul>
-                <li><strong>Report ID:</strong> ${report.id}</li>
-                <li><strong>Category:</strong> ${report.category}</li>
-                <li><strong>Severity:</strong> ${report.severity?.toUpperCase()}</li>
-                <li><strong>Submitted:</strong> ${new Date(report.created_at).toLocaleString()}</li>
-                <li><strong>Status:</strong> ${report.status}</li>
-                ${report.is_encrypted ? "<li><strong>Security:</strong> 🔒 End-to-End Encrypted</li>" : ""}
-              </ul>
+            <p><strong>Type:</strong> ${alert.alertType.toUpperCase()}</p>
+            <p><strong>Severity:</strong> ${alert.severity}</p>
+            <p><strong>Created:</strong> ${new Date(alert.created_at).toLocaleString()}</p>
+            <p><strong>Report ID:</strong> ${alert.reportId.toString()}</p>
+            
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 15px 0;">
+              <strong>Alert Message:</strong><br>
+              ${alert.message}
             </div>
             
-            <div class="details">
-              <h3>Required Actions</h3>
-              <ol>
-                <li>Log into the admin dashboard immediately</li>
-                <li>Review the full report details</li>
-                <li>Take appropriate administrative action</li>
-                <li>Respond within your organization's SLA timeframe</li>
-              </ol>
-            </div>
-            
-            <div style="text-align: center;">
-              <a href="${process.env.ADMIN_DASHBOARD_URL || "http://localhost:8080/admin"}" class="button">
-                🔐 Access Admin Dashboard
+            <div style="text-align: center; margin-top: 30px;">
+              <a href="http://localhost:8080/admin" 
+                 style="background: ${urgencyColor}; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
+                🔗 Access Admin Panel
               </a>
             </div>
           </div>
-          
-          <div class="footer">
-            <p>This is an automated alert from the Whistle Harassment Reporting System</p>
-            <p>For technical support, contact your system administrator</p>
-            <p>Report ID: ${report.id} | Timestamp: ${new Date().toISOString()}</p>
-          </div>
-        </body>
-        </html>
-      `,
-      text: `
-��� URGENT HARASSMENT REPORT - IMMEDIATE ACTION REQUIRED
+        </div>
+      `;
 
-A new urgent harassment report has been submitted and requires immediate administrative review.
+      const mailOptions = {
+        from: `${fromName} <${fromEmail}>`,
+        to: adminEmail,
+        subject: `🚨 ${urgencyBadge} Alert - Whistle Security`,
+        html: htmlContent,
+        priority: (alert.alertType === 'emergency' ? 'high' : 'normal') as 'high' | 'normal' | 'low'
+      };
 
-Report Details:
-- Report ID: ${report.id}
-- Category: ${report.category}
-- Severity: ${report.severity?.toUpperCase()}
-- Submitted: ${new Date(report.created_at).toLocaleString()}
-- Status: ${report.status}
-${report.is_encrypted ? "- Security: 🔒 End-to-End Encrypted" : ""}
-
-Required Actions:
-1. Log into the admin dashboard immediately
-2. Review the full report details  
-3. Take appropriate administrative action
-4. Respond within your organization's SLA timeframe
-
-Admin Dashboard: ${process.env.ADMIN_DASHBOARD_URL || "http://localhost:8080/admin"}
-
-This is an automated alert from the Whistle Harassment Reporting System.
-Report ID: ${report.id} | Timestamp: ${new Date().toISOString()}
-      `,
-    };
-
-    // Send the email
-    const info = await transporter.sendMail(emailOptions);
-
-    console.log("✅ Email sent successfully:", info.messageId);
-    console.log("📧 Email sent to:", emailOptions.to);
-    console.log("📬 Preview URL:", nodemailer.getTestMessageUrl(info));
-
-    return true;
-  } catch (error) {
-    console.error("❌ Failed to send email notification:", error);
-
-    // Log detailed error for debugging
-    if (error instanceof Error) {
-      console.error("Error details:", error.message);
-      if (error.message.includes("Invalid login")) {
-        console.error(
-          "💡 Tip: Make sure to use an App Password for Gmail, not your regular password",
-        );
-        console.error(
-          "💡 Generate one at: https://myaccount.google.com/apppasswords",
-        );
-      }
+      const result = await this.transporter.sendMail(mailOptions);
+      
+      console.log(`✉️ Alert email sent: ${alert.alertType} to ${adminEmail}`);
+      return true;
+    } catch (error) {
+      console.error('Failed to send alert email:', error);
+      return false;
     }
-
-    return false;
   }
-}
 
-/**
- * Test email configuration
- */
-export async function testEmailService(): Promise<boolean> {
-  try {
-    if (!EMAIL_CONFIG.auth.pass) {
-      console.log("❌ Email not configured - missing EMAIL_APP_PASSWORD");
+  async testConnection(): Promise<boolean> {
+    if (!this.isConfigured) {
       return false;
     }
 
-    await transporter.verify();
-    console.log("✅ Email service is ready");
-    return true;
-  } catch (error) {
-    console.error("❌ Email service test failed:", error);
-    return false;
+    try {
+      await this.transporter?.verify();
+      console.log('✅ Email service connection test passed');
+      return true;
+    } catch (error) {
+      console.log('❌ Email service connection test failed');
+      return false;
+    }
   }
 }
 
-/**
- * Send test email to verify configuration
- */
-export async function sendTestEmail(): Promise<boolean> {
-  const testReport: Report = {
-    id: "test_" + Date.now(),
-    message: "This is a test email from the Whistle system",
-    category: "feedback",
-    severity: "urgent",
-    created_at: new Date().toISOString(),
-    status: "pending",
-    is_encrypted: false,
-  };
-
-  return sendEmailAlert(testReport);
-}
+export const emailService = new EmailService();

@@ -33,6 +33,11 @@ import {
   Heart,
   MessageCircle,
   Flag,
+  MapPin,
+  Wifi,
+  WifiOff,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import {
@@ -42,11 +47,26 @@ import {
   ReportSeverity,
 } from "@shared/api";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
-import { encryptReportData } from "@/lib/secure-encryption";
-import { startSecureSession, clearSessionForPFS } from "@/lib/forward-secrecy";
+import { encryptReportData } from "@/lib/encryption";
 import VideoUploadRecorder, {
   VideoFile,
 } from "@/components/VideoUploadRecorder";
+import { moderateContent, getModerationMessage } from "@/lib/ai-moderation";
+import {
+  isOnline,
+  saveOfflineReport,
+  setupOfflineSync,
+  syncPendingReports,
+  getPendingReports,
+} from "@/lib/offline-storage";
+import {
+  getCurrentLocation,
+  checkGeolocationSupport,
+  reverseGeocode,
+  formatLocation,
+} from "@/lib/geolocation";
+import { Switch } from "@/components/ui/switch";
+import { toast } from "@/hooks/use-toast";
 
 export default function Report() {
   const [message, setMessage] = useState("");
@@ -59,17 +79,17 @@ export default function Report() {
   const [reportId, setReportId] = useState<string>("");
   const [error, setError] = useState<string>("");
 
-  // Initialize secure session with PFS when component mounts
-  useEffect(() => {
-    console.log("🛡️ Initializing secure session with Perfect Forward Secrecy");
-    startSecureSession();
-
-    // Cleanup session when component unmounts
-    return () => {
-      console.log("🛡️ Cleaning up secure session for PFS");
-      clearSessionForPFS();
-    };
-  }, []);
+  // New feature states
+  const [shareLocation, setShareLocation] = useState(false);
+  const [location, setLocation] = useState<any>(null);
+  const [gettingLocation, setGettingLocation] = useState(false);
+  const [locationError, setLocationError] = useState<string>("");
+  const [geolocationSupported, setGeolocationSupported] = useState(false);
+  const [online, setOnline] = useState(isOnline());
+  const [pendingReports, setPendingReports] = useState(0);
+  const [moderationResult, setModerationResult] = useState<any>(null);
+  const [showModerationWarning, setShowModerationWarning] = useState(false);
+  const [encrypt, setEncrypt] = useState(false); // Encryption toggle
 
   const categoryOptions = [
     {
@@ -80,7 +100,7 @@ export default function Report() {
     },
     {
       value: "medical",
-      label: "Medical Emergency",
+      label: "Medical Emergency", 
       icon: Heart,
       description: "Health-related emergencies or medical assistance needed",
     },
@@ -111,12 +131,136 @@ export default function Report() {
     { value: "urgent", label: "Urgent", color: "text-red-600" },
   ] as const;
 
+  // Check geolocation support and setup offline sync
+  useEffect(() => {
+    const initializeFeatures = async () => {
+      // Check geolocation support
+      const geoSupport = await checkGeolocationSupport();
+      setGeolocationSupported(geoSupport.supported);
+
+      // Setup offline sync
+      setupOfflineSync((results) => {
+        if (results.successful > 0) {
+          toast({
+            title: "Reports Synced",
+            description: `${results.successful} report(s) synced successfully`,
+          });
+        }
+        updatePendingCount();
+      });
+
+      // Initial pending count
+      updatePendingCount();
+    };
+
+    initializeFeatures();
+
+    // Listen for online/offline events
+    const handleOnline = () => {
+      setOnline(true);
+      toast({
+        title: "Connection Restored",
+        description: "Reports will be synced automatically",
+      });
+    };
+
+    const handleOffline = () => {
+      setOnline(false);
+      toast({
+        title: "Connection Lost",
+        description: "Reports will be saved offline",
+        variant: "destructive",
+      });
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  // AI Moderation effect
+  useEffect(() => {
+    if (message.trim().length > 10) {
+      const result = moderateContent(message);
+      setModerationResult(result);
+      setShowModerationWarning(result.isFlagged);
+    } else {
+      setModerationResult(null);
+      setShowModerationWarning(false);
+    }
+  }, [message]);
+
+  const updatePendingCount = () => {
+    setPendingReports(getPendingReports().length);
+  };
+
+  const getLocation = async () => {
+    if (!geolocationSupported) {
+      setLocationError("Geolocation not supported by this browser");
+      return;
+    }
+
+    setGettingLocation(true);
+    setLocationError("");
+
+    try {
+      const locationData = await getCurrentLocation();
+
+      // Get address if possible
+      try {
+        const address = await reverseGeocode(
+          locationData.latitude,
+          locationData.longitude,
+        );
+        locationData.address = address;
+      } catch (e) {
+        console.warn("Could not get address:", e);
+      }
+
+      setLocation(locationData);
+      toast({
+        title: "Location Captured",
+        description: formatLocation(locationData),
+      });
+    } catch (error: any) {
+      let errorMessage = "Failed to get location";
+      let toastDescription = "Failed to get location";
+      
+      if (error.code === 1) {
+        errorMessage = "Location access denied. Please allow location access in your browser settings.";
+        toastDescription = "Click the location icon in your browser's address bar to allow access";
+      } else if (error.code === 2) {
+        errorMessage = "Location information unavailable. Please check your GPS/location services.";
+        toastDescription = "Make sure location services are enabled on your device";
+      } else if (error.code === 3) {
+        errorMessage = "Location request timeout. Please try again.";
+        toastDescription = "Location request took too long, please try again";
+      } else {
+        errorMessage = error.message || errorMessage;
+        toastDescription = error.message || toastDescription;
+      }
+      
+      setLocationError(errorMessage);
+      toast({
+        title: "Location Error",
+        description: toastDescription,
+        variant: "destructive",
+      });
+    } finally {
+      setGettingLocation(false);
+    }
+  };
+
   const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      // Check file size (max 5MB)
-      if (file.size > 5 * 1024 * 1024) {
-        setError("Photo must be smaller than 5MB");
+      // Check file size (max 500MB for images)
+      if (file.size > 500 * 1024 * 1024) {
+        setError("Photo must be smaller than 500MB");
         return;
       }
 
@@ -155,6 +299,14 @@ export default function Report() {
       severity,
     });
 
+    console.log("Starting report submission:", {
+      hasPhotoFile: !!photoFile,
+      hasVideoFile: !!videoFile,
+      photoSize: photoFile?.size || 0,
+      videoSize: videoFile?.size || 0,
+      online: online
+    });
+
     setIsSubmitting(true);
     setError("");
 
@@ -176,10 +328,10 @@ export default function Report() {
       // In production, you'd upload to a file storage service with resumable uploads
       if (videoFile) {
         // Safety check: Don't process extremely large videos that could crash the browser
-        if (videoFile.size > 50 * 1024 * 1024) {
-          // 50MB limit for base64 conversion
+        if (videoFile.size > 1000 * 1024 * 1024) {
+          // 1000MB limit for video files
           setError(
-            "Video file too large for demo. In production, this would use cloud storage.",
+            "Video file too large. Please use a file smaller than 1000MB or try compressing the video.",
           );
           setIsSubmitting(false);
           return;
@@ -221,25 +373,15 @@ export default function Report() {
           message: message.trim(),
           category,
           severity,
-          photo_url: photo_url || undefined,
-          video_url: video_url || undefined,
-          video_metadata: videoFile
-            ? {
-                duration: videoFile.duration || 0,
-                size: videoFile.size,
-                format: videoFile.format,
-                isRecorded: videoFile.isRecorded,
-                uploadMethod:
-                  videoFile.size > 10 * 1024 * 1024 ? "resumable" : "direct",
-              }
-            : undefined,
           is_encrypted: false,
+          location: shareLocation && location ? location : undefined,
+          share_location: shareLocation,
+          is_offline_sync: !online,
         };
         console.log("Submitting plain text report (mobile device detected)");
       } else {
         try {
-          // Generate ephemeral keys and encrypt data with enhanced E2EE
-          console.log("🔒 Initiating enhanced E2EE encryption...");
+          // Try to encrypt data on desktop
           const encryptedData = encryptReportData({
             message: message.trim(),
             category,
@@ -252,7 +394,7 @@ export default function Report() {
                   format: videoFile.format,
                   isRecorded: videoFile.isRecorded,
                   uploadMethod:
-                    videoFile.size > 10 * 1024 * 1024 ? "resumable" : "direct",
+                    videoFile.size > 100 * 1024 * 1024 ? "resumable" : "direct",
                 }
               : undefined,
           });
@@ -263,6 +405,9 @@ export default function Report() {
             severity,
             encrypted_data: encryptedData,
             is_encrypted: true,
+            location: shareLocation && location ? location : undefined,
+            share_location: shareLocation,
+            is_offline_sync: !online,
           };
 
           console.log("Submitting encrypted report data"); // Debug log (no sensitive data)
@@ -277,57 +422,84 @@ export default function Report() {
             message: message.trim(),
             category,
             severity,
-            photo_url: photo_url || undefined,
-            video_url: video_url || undefined,
-            video_metadata: videoFile
-              ? {
-                  duration: videoFile.duration || 0,
-                  size: videoFile.size,
-                  format: videoFile.format,
-                  isRecorded: videoFile.isRecorded,
-                  uploadMethod:
-                    videoFile.size > 10 * 1024 * 1024 ? "resumable" : "direct",
-                }
-              : undefined,
             is_encrypted: false,
+            location: shareLocation && location ? location : undefined,
+            share_location: shareLocation,
+            is_offline_sync: !online,
           };
 
           console.log("Submitting plain text report data (encryption failed)");
         }
       }
 
-      const response = await fetch("/api/reports", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(reportData),
-      });
+      // Handle offline submission
+      if (!online) {
+        const offlineData = {
+          message: message.trim(),
+          category,
+          severity,
+          share_location: shareLocation,
+          is_offline_sync: true,
+        };
+        const offlineId = saveOfflineReport(offlineData);
+        console.log("Report saved offline:", offlineId);
 
-      console.log("Response status:", response.status); // Debug log
+        toast({
+          title: "Report Saved Offline",
+          description: "Your report will be synced when connection is restored",
+        });
 
-      if (!response.ok) {
-        let errorMessage = "Failed to submit report";
-        try {
-          const errorData = await response.json();
-          errorMessage = errorData.error || errorMessage;
-        } catch (e) {
-          console.warn("Could not parse error response");
-        }
-        console.error("API Error:", errorMessage);
-        throw new Error(errorMessage);
+        setReportId(offlineId);
+        setSubmitted(true);
+        updatePendingCount();
+        return;
       }
 
-      const result: CreateReportResponse = await response.json();
-      console.log("Success:", result); // Debug log
-      setReportId(result.id);
+      // Always use GridFS (multipart/form-data) submission
+      console.log("Submitting report via GridFS...");
+      const result = await submitWithGridFS();
+      
+      // Handle GridFS success response
+      if (result.success) {
+        setReportId(result.data.shortId); // Use shortId for tracking
+        setSubmitted(true);
+        
+        const hasFiles = (result.data.imageFiles > 0) || (result.data.videoFiles > 0);
+        
+        toast({
+          title: "Report Submitted Successfully",
+          description: hasFiles 
+            ? `Report #${result.data.shortId} with ${result.data.imageFiles || 0} image(s) and ${result.data.videoFiles || 0} video(s) uploaded to secure storage`
+            : `Report #${result.data.shortId} submitted successfully`,
+        });
+        
+        console.log("✅ GridFS submission completed:", {
+          reportId: result.data.id,
+          shortId: result.data.shortId,
+          imageFiles: result.data.imageFiles,
+          videoFiles: result.data.videoFiles,
+          locationAccuracy: result.data.locationAccuracy
+        });
+        return;
+      }
+      
+      // Fallback handling
+      setReportId(result.id || result.shortId);
       setSubmitted(true);
 
-      // Clear session keys immediately after successful submission for PFS
-      console.log(
-        "🛡️ Clearing session after successful submission for Perfect Forward Secrecy",
-      );
-      clearSessionForPFS();
+      // Show success message with moderation info if flagged
+      if (moderationResult?.isFlagged) {
+        toast({
+          title: "Report Submitted",
+          description: "⚠️ Report flagged for review by AI moderation",
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Report Submitted",
+          description: "Your report has been submitted successfully",
+        });
+      }
     } catch (err) {
       console.error("Error submitting report:", err);
       setError(
@@ -336,6 +508,91 @@ export default function Report() {
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  // GridFS file upload with multipart/form-data
+  const submitWithGridFS = async () => {
+    const formData = new FormData();
+    
+    // Add text fields
+    formData.append('message', message.trim());
+    formData.append('category', category);
+    formData.append('severity', severity);
+    formData.append('share_location', shareLocation.toString());
+    formData.append('is_offline_sync', (!online).toString());
+    formData.append('is_encrypted', encrypt.toString());
+    
+    // Add high-precision location data if available
+    if (shareLocation && location) {
+      // Ensure high-precision location data
+      const highPrecisionLocation = {
+        ...location,
+        source: 'browser_gps',
+        captureMethod: 'getCurrentPosition',
+        enableHighAccuracy: true,
+        timestamp: Date.now()
+      };
+      formData.append('location', JSON.stringify(highPrecisionLocation));
+      console.log('📍 Submitting high-precision location:', {
+        accuracy: location.accuracy,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        altitude: location.altitude,
+        heading: location.heading,
+        speed: location.speed
+      });
+    }
+    
+    // Add files for GridFS storage
+    if (photoFile) {
+      formData.append('image', photoFile);
+      console.log('📸 Submitting image for GridFS:', {
+        name: photoFile.name,
+        size: photoFile.size,
+        type: photoFile.type
+      });
+    }
+    if (videoFile) {
+      formData.append('video', videoFile.file);
+      console.log('🎥 Submitting video for GridFS:', {
+        name: videoFile.file.name,
+        size: videoFile.size,
+        type: videoFile.file.type
+      });
+    }
+
+    console.log('📤 Submitting to unified reports endpoint: /api/reports');
+    const response = await fetch("/api/reports", {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      let errorMessage = "Failed to submit report with GridFS storage";
+      try {
+        const errorData = await response.json();
+        errorMessage = errorData.error || errorMessage;
+        console.error('GridFS submission error:', errorData);
+      } catch (e) {
+        console.warn("Could not parse GridFS error response");
+      }
+      throw new Error(errorMessage);
+    }
+
+    const result = await response.json();
+    console.log("✅ GridFS submission success:", result);
+    
+    return result;
+    
+    // Handle success response format  
+    const reportData = result.success ? result.data : result;
+    setReportId(reportData.id || reportData.shortId);
+    setSubmitted(true);
+
+    toast({
+      title: "Report Submitted",
+      description: "Your report has been submitted successfully",
+    });
   };
 
   if (submitted) {
@@ -538,6 +795,141 @@ export default function Report() {
                   </div>
                 </div>
 
+                {/* Status indicators */}
+                <div className="flex flex-wrap gap-2 p-3 bg-muted/50 rounded-lg">
+                  <div
+                    className={`flex items-center gap-2 text-sm ${online ? "text-green-600" : "text-red-600"}`}
+                  >
+                    {online ? (
+                      <Wifi className="w-4 h-4" />
+                    ) : (
+                      <WifiOff className="w-4 h-4" />
+                    )}
+                    {online ? "Online" : "Offline"}
+                  </div>
+
+                  {pendingReports > 0 && (
+                    <Badge variant="secondary" className="text-xs">
+                      {pendingReports} pending sync
+                    </Badge>
+                  )}
+
+                  {moderationResult?.isFlagged && (
+                    <Badge variant="destructive" className="text-xs">
+                      ⚠️ AI Flagged
+                    </Badge>
+                  )}
+
+                  {location && (
+                    <Badge variant="outline" className="text-xs">
+                      <MapPin className="w-3 h-3 mr-1" />
+                      Location captured
+                    </Badge>
+                  )}
+                </div>
+
+                {/* Location sharing toggle */}
+                {geolocationSupported && (
+                  <div className="space-y-3 p-4 bg-blue-50 dark:bg-blue-950/20 rounded-lg border border-blue-200 dark:border-blue-800">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <MapPin className="w-5 h-5 text-blue-600" />
+                        <div>
+                          <Label
+                            htmlFor="share-location"
+                            className="text-sm font-medium"
+                          >
+                            Share Location
+                          </Label>
+                          <p className="text-xs text-muted-foreground">
+                            Help authorities locate the incident
+                          </p>
+                        </div>
+                      </div>
+                      <Switch
+                        id="share-location"
+                        checked={shareLocation}
+                        onCheckedChange={setShareLocation}
+                      />
+                    </div>
+
+                    {shareLocation && !location && (
+                      <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={getLocation}
+                          disabled={gettingLocation}
+                          className="text-xs"
+                        >
+                          {gettingLocation ? (
+                            <>
+                              <div className="w-3 h-3 border border-blue-600 border-t-transparent rounded-full animate-spin mr-2" />
+                              Getting location...
+                            </>
+                          ) : (
+                            <>
+                              <MapPin className="w-3 h-3 mr-1" />
+                              Capture Location
+                            </>
+                          )}
+                        </Button>
+                        {locationError && (
+                          <div className="space-y-2">
+                            <span className="text-xs text-red-600">
+                              {locationError}
+                            </span>
+                            {locationError.includes("denied") && (
+                              <div className="text-xs bg-yellow-50 dark:bg-yellow-950/20 p-2 rounded border border-yellow-200 dark:border-yellow-800">
+                                <strong>💡 Location Help:</strong>
+                                <br />
+                                1. Click the location icon (🌐) in your browser's address bar
+                                <br />
+                                2. Select "Allow" for location access
+                                <br />
+                                3. Refresh this page and try again
+                                <br />
+                                <em>Alternative:</em> Try using{" "}
+                                <code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">
+                                  127.0.0.1:8086
+                                </code>{" "}
+                                instead of localhost
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {location && (
+                      <div className="text-xs space-y-1">
+                        <div className="flex items-center gap-1 text-green-600">
+                          <CheckCircle className="w-3 h-3" />
+                          Location captured
+                        </div>
+                        <div className="text-muted-foreground">
+                          📍 {formatLocation(location)}
+                        </div>
+                        {location.address && (
+                          <div className="text-muted-foreground truncate">
+                            {location.address}
+                          </div>
+                        )}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setLocation(null)}
+                          className="text-xs h-6 px-2"
+                        >
+                          Clear location
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <Label htmlFor="message">Your Report *</Label>
                   <Textarea
@@ -551,6 +943,26 @@ export default function Report() {
                   <p className="text-xs text-muted-foreground">
                     {message.length}/1000 characters
                   </p>
+
+                  {/* AI Moderation Warning */}
+                  {showModerationWarning && moderationResult && (
+                    <Alert variant="destructive" className="mt-2">
+                      <AlertTriangle className="h-4 w-4" />
+                      <AlertDescription className="text-sm">
+                        {getModerationMessage(moderationResult)}
+                        {moderationResult.detectedTerms.length > 0 && (
+                          <div className="mt-1 text-xs">
+                            Detected:{" "}
+                            {moderationResult.detectedTerms
+                              .slice(0, 3)
+                              .join(", ")}
+                            {moderationResult.detectedTerms.length > 3 &&
+                              ` +${moderationResult.detectedTerms.length - 3} more`}
+                          </div>
+                        )}
+                      </AlertDescription>
+                    </Alert>
+                  )}
                 </div>
 
                 <div className="space-y-2">
@@ -581,7 +993,7 @@ export default function Report() {
                         </div>
                         <p className="text-sm">Click to upload a photo</p>
                         <p className="text-xs text-muted-foreground">
-                          PNG, JPG up to 5MB
+                          PNG, JPG up to 500MB
                         </p>
                       </div>
                     )}

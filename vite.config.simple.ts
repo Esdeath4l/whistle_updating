@@ -31,33 +31,29 @@ function expressPlugin(): Plugin {
     async configureServer(server) {
       console.log("🔧 Setting up Express server in Vite dev mode...");
       
-      // Try to connect to MongoDB in the background (non-blocking)
-      (async () => {
-        try {
-          const connectDB = (await import("./shared/db")).default;
-          await connectDB();
-          console.log("🎯 MongoDB connected in dev mode");
-        } catch (error) {
-          console.error("❌ MongoDB connection failed in dev mode:", error.message);
-          console.log("⚠️  Continuing with in-memory storage for development");
-        }
-      })();
+      // Simple express setup without complex imports during vite startup
+      const express = await import("express");
+      const cors = await import("cors");
       
-      const { createServer } = await import("./server");
-      const app = createServer();
+      const app = express.default();
+      app.use(cors.default());
+      app.use(express.default.json({ limit: "50mb" }));
+      
+      // Basic health check route
+      app.get("/api/ping", (req, res) => {
+        res.json({ message: "Server is running" });
+      });
       
       // Add debugging middleware
       app.use((req, res, next) => {
-        if (req.url?.startsWith('/api/')) {
-          console.log(`📡 API Request: ${req.method} ${req.url}`);
+        if (req.path.startsWith("/api/")) {
+          console.log(`🔍 API Request: ${req.method} ${req.path}`);
         }
         next();
       });
-
-      // Only add Express app for API routes - let Vite handle everything else
-      server.middlewares.use('/api', app);
       
-      console.log("✅ Express server integrated with Vite (API routes only)");
+      // Use vite's middleware
+      server.middlewares.use(app);
     },
   };
 }

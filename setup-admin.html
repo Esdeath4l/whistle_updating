@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Setup - Whistle</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+        button { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .result { margin-top: 20px; padding: 15px; border-radius: 4px; }
+        .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+    </style>
+</head>
+<body>
+    <h1>🔧 Whistle Admin Setup</h1>
+    
+    <div class="info">
+        <h3>Setup Instructions:</h3>
+        <p>1. Click "Setup Admin" to create the initial admin account</p>
+        <p>2. Use the provided credentials to login</p>
+        <p>3. Go to <a href="/admin">/admin</a> to access the admin panel</p>
+    </div>
+
+    <button onclick="setupAdmin()">Setup Admin Account</button>
+    <button onclick="testLogin()">Test Admin Login</button>
+
+    <div id="result"></div>
+
+    <script>
+        async function setupAdmin() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '<div class="info">Setting up admin account...</div>';
+            
+            try {
+                const response = await fetch('/api/setup-admin', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    resultDiv.innerHTML = `
+                        <div class="success">
+                            <h3>✅ Admin Setup Complete!</h3>
+                            <p><strong>Username:</strong> ${data.credentials.username}</p>
+                            <p><strong>Password:</strong> ${data.credentials.password}</p>
+                            <p><strong>Email:</strong> ${data.credentials.email}</p>
+                            <p>You can now <a href="/admin">login to the admin panel</a></p>
+                        </div>
+                    `;
+                } else {
+                    resultDiv.innerHTML = `
+                        <div class="error">
+                            <h3>❌ Setup Failed</h3>
+                            <p>${data.message}</p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="error">
+                        <h3>❌ Error</h3>
+                        <p>${error.message}</p>
+                    </div>
+                `;
+            }
+        }
+
+        async function testLogin() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '<div class="info">Testing admin login...</div>';
+            
+            try {
+                const response = await fetch('/api/admin/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        username: 'admin',
+                        password: 'admin123'
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    resultDiv.innerHTML = `
+                        <div class="success">
+                            <h3>✅ Login Successful!</h3>
+                            <p>Admin: ${data.data.admin.username} (${data.data.admin.email})</p>
+                            <p>Role: ${data.data.admin.role}</p>
+                            <p>Token generated successfully</p>
+                            <p>You can now <a href="/admin">access the admin panel</a></p>
+                        </div>
+                    `;
+                } else {
+                    resultDiv.innerHTML = `
+                        <div class="error">
+                            <h3>❌ Login Failed</h3>
+                            <p>${data.error}</p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="error">
+                        <h3>❌ Error</h3>
+                        <p>${error.message}</p>
+                    </div>
+                `;
+            }
+        }
+    </script>
+</body>
+</html>

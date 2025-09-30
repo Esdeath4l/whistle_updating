@@ -27,7 +27,7 @@ export default function QRCodeGenerator({ reportUrl }: QRCodeGeneratorProps) {
   const currentUrl = reportUrl || `${window.location.origin}/report`;
 
   const downloadQR = () => {
-    const svg = document.getElementById("qr-code") as SVGElement;
+    const svg = document.getElementById("qr-code") as unknown as SVGElement | null;
     if (svg) {
       const svgData = new XMLSerializer().serializeToString(svg);
       const canvas = document.createElement("canvas");
@@ -51,7 +51,7 @@ export default function QRCodeGenerator({ reportUrl }: QRCodeGeneratorProps) {
   };
 
   const printQR = () => {
-    const svg = document.getElementById("qr-code") as SVGElement;
+    const svg = document.getElementById("qr-code") as unknown as SVGElement | null;
     if (svg) {
       const svgData = new XMLSerializer().serializeToString(svg);
       const printWindow = window.open("", "_blank");

@@ -45,6 +45,8 @@ import {
   MessageCircle,
   Settings,
   Video,
+  MapPin,
+  Map,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import {
@@ -53,8 +55,10 @@ import {
   GetReportsResponse,
   UpdateReportRequest,
 } from "@shared/api";
-import { secureE2EE } from "@/lib/secure-encryption";
+import { decryptReportData } from "@/lib/encryption";
 import { notificationService } from "@/lib/notifications";
+import ReportsMap from "@/components/ReportsMap";
+import { formatLocation } from "@/lib/geolocation";
 
 export default function Admin() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -64,7 +68,6 @@ export default function Admin() {
   const [reports, setReports] = useState<Report[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedReport, setSelectedReport] = useState<Report | null>(null);
-  const [loadingDetails, setLoadingDetails] = useState(false);
   const [adminResponse, setAdminResponse] = useState("");
   const [statusFilter, setStatusFilter] = useState<ReportStatus | "all">("all");
 
@@ -99,19 +102,20 @@ export default function Admin() {
         setIsAuthenticated(true);
         fetchReports();
 
-        // Setup real-time notifications with delay to ensure auth is ready
-        setTimeout(() => {
-          console.log("Setting up real-time notifications...");
-          notificationService.setOnNewReportCallback(() => {
-            console.log("🔄 Auto-refreshing reports due to notification");
-            fetchReports();
-          });
+        // Setup real-time notifications with error handling
+        try {
           notificationService.setupRealtimeNotifications(authToken);
-        }, 1000);
 
-        // Request notification permission
-        if ("Notification" in window && Notification.permission === "default") {
-          await Notification.requestPermission();
+          // Request notification permission
+          if (
+            "Notification" in window &&
+            Notification.permission === "default"
+          ) {
+            await Notification.requestPermission();
+          }
+        } catch (notificationError) {
+          console.warn("Failed to setup notifications:", notificationError);
+          // Don't block login if notifications fail
         }
       } else {
         setLoginError(data.error || "Invalid username or password");
@@ -139,36 +143,11 @@ export default function Admin() {
       if (response.ok) {
         const data: GetReportsResponse = await response.json();
         setReports(data.reports);
-        console.log(`Loaded ${data.reports.length} reports successfully`);
       }
     } catch (error) {
       console.error("Error fetching reports:", error);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const fetchReportDetails = async (reportId: string) => {
-    setLoadingDetails(true);
-    try {
-      console.log(`Fetching full details for report ${reportId}`);
-      const response = await fetch(`/api/reports/${reportId}/details`, {
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-        },
-      });
-
-      if (response.ok) {
-        const fullReport: Report = await response.json();
-        console.log(`Loaded full details for report ${reportId}`);
-        setSelectedReport(fullReport);
-      } else {
-        console.error("Failed to fetch report details");
-      }
-    } catch (error) {
-      console.error("Error fetching report details:", error);
-    } finally {
-      setLoadingDetails(false);
     }
   };
 
@@ -178,11 +157,6 @@ export default function Admin() {
     response?: string,
   ) => {
     try {
-      console.log(`Updating report ${reportId}:`, {
-        status,
-        response: response ? "provided" : "none",
-      });
-
       const updateData: UpdateReportRequest = { status };
       if (response) {
         updateData.admin_response = response;
@@ -198,15 +172,9 @@ export default function Admin() {
       });
 
       if (res.ok) {
-        console.log(`✅ Successfully updated report ${reportId}`);
         fetchReports();
         setSelectedReport(null);
         setAdminResponse("");
-      } else {
-        console.error(
-          `❌ Failed to update report ${reportId}:`,
-          await res.text(),
-        );
       }
     } catch (error) {
       console.error("Error updating report:", error);
@@ -314,47 +282,19 @@ export default function Admin() {
   const getDecryptedReport = (report: Report) => {
     if (report.is_encrypted && report.encrypted_data) {
       try {
-        console.log("🔓 Decrypting report with enhanced E2EE:", report.id);
-
-        // Generate admin keys for decryption if we have session info
-        let adminKeys = null;
-        if (report.encrypted_data.sessionId) {
-          adminKeys = secureE2EE.generateAdminKeys({
-            username: "ritika", // Current admin username
-            password: "satoru 2624", // Current admin password
-            sessionId: report.encrypted_data.sessionId,
-          });
-        }
-
-        // Use enhanced decryption with admin keys
-        return secureE2EE.decryptReportData(report.encrypted_data, adminKeys);
+        return decryptReportData(report.encrypted_data);
       } catch (error) {
         console.error("Failed to decrypt report:", error);
-
-        // Fallback to legacy decryption if enhanced fails
-        try {
-          const {
-            decryptReportData: legacyDecrypt,
-          } = require("@/lib/encryption");
-          console.log("🔄 Falling back to legacy decryption");
-          return legacyDecrypt(report.encrypted_data);
-        } catch (legacyError) {
-          console.error("Legacy decryption also failed:", legacyError);
-          return {
-            message: "[DECRYPTION ERROR - Enhanced E2EE failed]",
-            category: "encrypted",
-            photo_url: undefined,
-            video_url: undefined,
-            video_metadata: undefined,
-          };
-        }
+        return {
+          message: "[DECRYPTION ERROR]",
+          category: "encrypted",
+          video_metadata: undefined,
+        };
       }
     }
     return {
       message: report.message,
       category: report.category,
-      photo_url: report.photo_url,
-      video_url: report.video_url,
       video_metadata: report.video_metadata,
     };
   };
@@ -518,8 +458,155 @@ export default function Admin() {
               <Button onClick={fetchReports} variant="outline" size="sm">
                 Refresh
               </Button>
+
+              <Button
+                onClick={async () => {
+                  // Test urgent notification
+                  const urgentReport = {
+                    message:
+                      "URGENT TEST: Immediate threat in building - security needed now!",
+                    category: "emergency",
+                    severity: "urgent",
+                    location: {
+                      latitude: 37.7749,
+                      longitude: -122.4194,
+                      accuracy: 2, // Very precise GPS for emergency (2m)
+                      timestamp: Date.now(),
+                      address: "Emergency Test Location, San Francisco, CA",
+                    },
+                    share_location: true,
+                  };
+
+                  try {
+                    const response = await fetch("/api/reports", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(urgentReport),
+                    });
+
+                    if (response.ok) {
+                      alert(
+                        "🚨 Urgent test report created! You should receive notifications.",
+                      );
+                      fetchReports();
+                    } else {
+                      alert("Failed to create urgent test report");
+                    }
+                  } catch (error) {
+                    alert("Error creating urgent test report: " + error);
+                  }
+                }}
+                variant="destructive"
+                size="sm"
+              >
+                🚨 Test Urgent Alert
+              </Button>
+
+              <Button
+                onClick={async () => {
+                  // Add demo data for testing
+                  const demoReports = [
+                    {
+                      message:
+                        "Someone was using offensive language and making threats in the office",
+                      category: "harassment",
+                      severity: "high",
+                      location: {
+                        latitude: 37.7749,
+                        longitude: -122.4194,
+                        accuracy: 5, // High accuracy GPS (5m)
+                        timestamp: Date.now(),
+                        address: "123 Market Street, San Francisco, CA",
+                      },
+                      share_location: true,
+                    },
+                    {
+                      message: "Emergency medical situation in building lobby",
+                      category: "medical",
+                      severity: "urgent",
+                      location: {
+                        latitude: 37.7849,
+                        longitude: -122.4094,
+                        accuracy: 3, // Very high accuracy GPS (3m)
+                        timestamp: Date.now(),
+                        address: "456 Mission Street, San Francisco, CA",
+                      },
+                      share_location: true,
+                    },
+                    {
+                      message:
+                        "Great feedback about the new lunch menu options",
+                      category: "feedback",
+                      severity: "low",
+                      location: {
+                        latitude: 37.7649,
+                        longitude: -122.4294,
+                        accuracy: 8, // Good accuracy GPS (8m)
+                        timestamp: Date.now(),
+                        address: "789 Howard Street, San Francisco, CA",
+                      },
+                      share_location: true,
+                    },
+                  ];
+
+                  for (const report of demoReports) {
+                    await fetch("/api/reports", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(report),
+                    });
+                  }
+
+                  fetchReports();
+                }}
+                variant="secondary"
+                size="sm"
+              >
+                Add Demo Data
+              </Button>
             </div>
           </div>
+
+          {/* Reports Map */}
+          {reports.length > 0 && (
+            <Card className="mb-8">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Map className="w-5 h-5" />
+                  Reports Location Map
+                </CardTitle>
+                <CardDescription>
+                  Interactive map showing report locations with clustering.
+                  Flagged reports are highlighted with special markers.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <ReportsMap
+                  reports={reports}
+                  onReportSelect={setSelectedReport}
+                  className="h-96 w-full rounded-lg border"
+                />
+                <div className="mt-4 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                  <div className="flex items-center gap-1">
+                    <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
+                    Normal reports
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <div className="w-3 h-3 bg-red-500 rounded-full"></div>
+                    Flagged reports
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <div className="w-3 h-3 bg-orange-500 rounded-full"></div>
+                    AI flagged
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <div className="w-3 h-3 bg-red-600 rounded-full"></div>
+                    Urgent reports
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           {/* Reports List */}
           {loading ? (
@@ -576,23 +663,41 @@ export default function Admin() {
                             Plain Text
                           </Badge>
                         )}
-                        {(report.photo_url ||
-                          (report.is_encrypted &&
-                            getDecryptedReport(report).photo_url)) && (
+                        {(report.imageFileIds && report.imageFileIds.length > 0) && (
                           <Badge variant="outline">
                             <ImageIcon className="w-3 h-3 mr-1" />
                             Photo
                           </Badge>
                         )}
-                        {(report.video_url ||
-                          (report.is_encrypted &&
-                            getDecryptedReport(report).video_url)) && (
+                        {(report.videoFileIds && report.videoFileIds.length > 0) && (
                           <Badge
                             variant="outline"
                             className="bg-purple-50 text-purple-700 border-purple-300"
                           >
                             <Video className="w-3 h-3 mr-1" />
                             Video
+                          </Badge>
+                        )}
+                        {report.moderation?.isFlagged && (
+                          <Badge
+                            variant="secondary"
+                            className="bg-yellow-100 text-yellow-800 border-yellow-300"
+                          >
+                            ⚠️ AI Flagged
+                          </Badge>
+                        )}
+                        {report.location && (
+                          <Badge variant="outline">
+                            <MapPin className="w-3 h-3 mr-1" />
+                            Location
+                          </Badge>
+                        )}
+                        {report.is_offline_sync && (
+                          <Badge
+                            variant="secondary"
+                            className="bg-blue-100 text-blue-800 border-blue-300"
+                          >
+                            📱 Offline Sync
                           </Badge>
                         )}
                       </div>
@@ -620,14 +725,13 @@ export default function Admin() {
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => fetchReportDetails(report.id)}
-                            disabled={loadingDetails}
+                            onClick={() => setSelectedReport(report)}
                           >
                             <Eye className="w-4 h-4 mr-2" />
-                            {loadingDetails ? "Loading..." : "View Details"}
+                            View Details
                           </Button>
                         </DialogTrigger>
-                        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+                        <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
                           <DialogHeader>
                             <DialogTitle>Report Details</DialogTitle>
                             <DialogDescription>
@@ -636,7 +740,7 @@ export default function Admin() {
                           </DialogHeader>
 
                           {selectedReport && (
-                            <div className="space-y-6">
+                            <div className="space-y-6 overflow-y-auto pr-2 flex-1">
                               <div>
                                 <Label className="text-sm font-medium">
                                   Status
@@ -675,10 +779,7 @@ export default function Admin() {
                                 </div>
                               </div>
 
-                              {(selectedReport.photo_url ||
-                                (selectedReport.is_encrypted &&
-                                  getDecryptedReport(selectedReport)
-                                    .photo_url)) && (
+                              {(selectedReport.imageFileIds && selectedReport.imageFileIds.length > 0) && (
                                 <div>
                                   <Label className="text-sm font-medium">
                                     Photo Evidence
@@ -690,33 +791,28 @@ export default function Admin() {
                                     )}
                                   </Label>
                                   <div className="mt-2">
-                                    <img
-                                      src={
-                                        selectedReport.is_encrypted
-                                          ? getDecryptedReport(selectedReport)
-                                              .photo_url
-                                          : selectedReport.photo_url
-                                      }
-                                      alt="Report evidence"
-                                      className="max-w-full h-auto rounded-lg border"
-                                      onError={(e) => {
-                                        console.error(
-                                          "Failed to load photo:",
-                                          e,
-                                        );
-                                        (
-                                          e.target as HTMLImageElement
-                                        ).style.display = "none";
-                                      }}
-                                    />
+                                    {selectedReport.imageFileIds.map((fileId, index) => (
+                                      <img
+                                        key={fileId}
+                                        src={`/api/files/images/${fileId}`}
+                                        alt={`Report evidence ${index + 1}`}
+                                        className="max-w-full h-auto rounded-lg border mb-2"
+                                        onError={(e) => {
+                                          console.error(
+                                            "Failed to load photo:",
+                                            e,
+                                          );
+                                          (
+                                            e.target as HTMLImageElement
+                                          ).style.display = "none";
+                                        }}
+                                      />
+                                    ))}
                                   </div>
                                 </div>
                               )}
 
-                              {(selectedReport.video_url ||
-                                (selectedReport.is_encrypted &&
-                                  getDecryptedReport(selectedReport)
-                                    .video_url)) && (
+                              {(selectedReport.videoFileIds && selectedReport.videoFileIds.length > 0) && (
                                 <div>
                                   <Label className="text-sm font-medium">
                                     Video Evidence
@@ -745,95 +841,128 @@ export default function Admin() {
                                     )}
                                   </Label>
                                   <div className="mt-2">
-                                    {(() => {
-                                      const videoUrl =
-                                        selectedReport.is_encrypted
-                                          ? getDecryptedReport(selectedReport)
-                                              .video_url
-                                          : selectedReport.video_url;
+                                    {selectedReport.videoFileIds.map((fileId, index) => (
+                                      <video
+                                        key={fileId}
+                                        src={`/api/files/videos/${fileId}`}
+                                        controls
+                                        preload="metadata"
+                                        className="max-w-full h-auto rounded-lg border bg-black mb-2"
+                                        style={{ maxHeight: "300px" }}
+                                        onError={(e) => {
+                                          console.error(
+                                            "Failed to load video:",
+                                            e,
+                                          );
+                                          (
+                                            e.target as HTMLVideoElement
+                                          ).style.display = "none";
+                                        }}
+                                      >
+                                        Your browser does not support video
+                                        playback.
+                                      </video>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
 
-                                      // Check for placeholder video data from optimized loading
-                                      if (
-                                        videoUrl === "[LARGE_VIDEO_DATA]" ||
-                                        (selectedReport.is_encrypted &&
-                                          getDecryptedReport(selectedReport)
-                                            .video_url ===
-                                            "[LARGE_ENCRYPTED_VIDEO]")
-                                      ) {
-                                        return (
-                                          <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                                            <div className="flex items-center gap-2 mb-2">
-                                              <Video className="w-5 h-5 text-blue-600" />
-                                              <span className="font-medium text-blue-800">
-                                                Video Available
-                                              </span>
-                                            </div>
-                                            <p className="text-sm text-blue-700">
-                                              Video evidence is available but
-                                              not loaded for performance. In
-                                              production, this would be streamed
-                                              from cloud storage.
-                                            </p>
-                                          </div>
-                                        );
-                                      }
+                              {/* Location Information */}
+                              {selectedReport.location && (
+                                <div>
+                                  <Label className="text-sm font-medium">
+                                    Location Information
+                                  </Label>
+                                  <div className="mt-2 p-4 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                                    <div className="flex items-center gap-2 mb-2">
+                                      <MapPin className="w-4 h-4 text-blue-600" />
+                                      <span className="font-medium text-sm">
+                                        {formatLocation(
+                                          selectedReport.location,
+                                        )}
+                                      </span>
+                                    </div>
+                                    {selectedReport.location.address && (
+                                      <p className="text-sm text-muted-foreground">
+                                        📍 {selectedReport.location.address}
+                                      </p>
+                                    )}
+                                    <p className="text-xs text-muted-foreground mt-1">
+                                      Accuracy: ±
+                                      {Math.round(
+                                        selectedReport.location.accuracy,
+                                      )}
+                                      m • Captured:{" "}
+                                      {new Date(
+                                        selectedReport.location.timestamp,
+                                      ).toLocaleString()}
+                                    </p>
+                                  </div>
+                                </div>
+                              )}
 
-                                      // Check if video URL is too large (base64 data URLs can be huge)
-                                      if (
-                                        videoUrl &&
-                                        videoUrl.length > 50000000
-                                      ) {
-                                        // ~50MB base64 limit
-                                        return (
-                                          <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg">
-                                            <div className="flex items-center gap-2 mb-2">
-                                              <AlertCircle className="w-5 h-5 text-amber-600" />
-                                              <span className="font-medium text-amber-800">
-                                                Video Too Large for Preview
-                                              </span>
-                                            </div>
-                                            <p className="text-sm text-amber-700">
-                                              Video file is too large to display
-                                              in browser. In production, this
-                                              would be streamed from cloud
-                                              storage.
-                                            </p>
-                                            <p className="text-xs text-amber-600 mt-2">
-                                              Size:{" "}
-                                              {(
-                                                (selectedReport.video_metadata
-                                                  ?.size || 0) /
-                                                1024 /
-                                                1024
-                                              ).toFixed(1)}
-                                              MB
-                                            </p>
-                                          </div>
-                                        );
-                                      }
-
-                                      return (
-                                        <video
-                                          src={videoUrl}
-                                          controls
-                                          preload="metadata"
-                                          className="max-w-full h-auto rounded-lg border bg-black"
-                                          style={{ maxHeight: "300px" }}
-                                          onError={(e) => {
-                                            console.error(
-                                              "Failed to load video:",
-                                              e,
-                                            );
-                                            (
-                                              e.target as HTMLVideoElement
-                                            ).style.display = "none";
-                                          }}
-                                        >
-                                          Your browser does not support video
-                                          playback.
-                                        </video>
-                                      );
-                                    })()}
+                              {/* AI Moderation Results */}
+                              {selectedReport.moderation && (
+                                <div>
+                                  <Label className="text-sm font-medium">
+                                    AI Moderation Analysis
+                                  </Label>
+                                  <div
+                                    className={`mt-2 p-4 rounded-lg border ${
+                                      selectedReport.moderation.isFlagged
+                                        ? "bg-yellow-50 dark:bg-yellow-950/20 border-yellow-200 dark:border-yellow-800"
+                                        : "bg-green-50 dark:bg-green-950/20 border-green-200 dark:border-green-800"
+                                    }`}
+                                  >
+                                    <div className="flex items-center gap-2 mb-2">
+                                      {selectedReport.moderation.isFlagged ? (
+                                        <AlertTriangle className="w-4 h-4 text-yellow-600" />
+                                      ) : (
+                                        <CheckCircle className="w-4 h-4 text-green-600" />
+                                      )}
+                                      <span
+                                        className={`font-medium text-sm ${
+                                          selectedReport.moderation.isFlagged
+                                            ? "text-yellow-800"
+                                            : "text-green-800"
+                                        }`}
+                                      >
+                                        {selectedReport.moderation.isFlagged
+                                          ? "Content Flagged"
+                                          : "Content Cleared"}
+                                      </span>
+                                      <Badge
+                                        variant="outline"
+                                        className="text-xs"
+                                      >
+                                        {Math.round(
+                                          selectedReport.moderation.confidence *
+                                            100,
+                                        )}
+                                        % confidence
+                                      </Badge>
+                                    </div>
+                                    {selectedReport.moderation.reason && (
+                                      <p className="text-sm text-muted-foreground mb-2">
+                                        {selectedReport.moderation.reason}
+                                      </p>
+                                    )}
+                                    {selectedReport.moderation.detectedTerms
+                                      .length > 0 && (
+                                      <div className="text-xs">
+                                        <span className="text-muted-foreground">
+                                          Detected terms:{" "}
+                                        </span>
+                                        <span className="font-mono">
+                                          {selectedReport.moderation.detectedTerms
+                                            .slice(0, 5)
+                                            .join(", ")}
+                                          {selectedReport.moderation
+                                            .detectedTerms.length > 5 &&
+                                            ` +${selectedReport.moderation.detectedTerms.length - 5} more`}
+                                        </span>
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                               )}
@@ -870,10 +999,21 @@ export default function Admin() {
                                   id="admin-response"
                                   placeholder="Add an administrative response..."
                                   value={adminResponse}
-                                  onChange={(e) =>
-                                    setAdminResponse(e.target.value)
-                                  }
+                                  onChange={(e) => {
+                                    // Prevent event bubbling that might cause hangs
+                                    e.stopPropagation();
+                                    setAdminResponse(e.target.value);
+                                  }}
+                                  onKeyDown={(e) => {
+                                    // Prevent event bubbling for keyboard events
+                                    e.stopPropagation();
+                                  }}
+                                  onFocus={(e) => {
+                                    // Prevent event bubbling for focus events
+                                    e.stopPropagation();
+                                  }}
                                   className="mt-2"
+                                  rows={4}
                                 />
                               </div>
 

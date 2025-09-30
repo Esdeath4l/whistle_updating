@@ -4,7 +4,7 @@ import { Report } from "@shared/api";
 // In-memory storage for SSE connections
 const sseConnections = new Set<any>();
 
-// Admin authentication credentials
+// Admin authentication credentials (same as in reports.ts)
 const ADMIN_USERNAME = "ritika";
 const ADMIN_PASSWORD = "satoru 2624";
 
@@ -67,35 +67,18 @@ export const streamNotifications: RequestHandler = (req, res) => {
 export function broadcastNotification(notification: any) {
   const data = `data: ${JSON.stringify(notification)}\n\n`;
 
-  console.log(
-    `📡 Broadcasting notification to ${sseConnections.size} connected admins:`,
-    {
-      type: notification.type,
-      reportId: notification.reportId,
-      connections: sseConnections.size,
-    },
-  );
-
-  let successCount = 0;
-  let failureCount = 0;
-
   sseConnections.forEach((connection) => {
     try {
       connection.res.write(data);
-      successCount++;
-      console.log(`✅ Sent notification to connection ${connection.id}`);
     } catch (error) {
-      failureCount++;
-      console.error(
-        `❌ Failed to send notification to connection ${connection.id}:`,
-        error,
-      );
+      console.error("Failed to send notification to connection:", error);
       sseConnections.delete(connection);
     }
   });
 
   console.log(
-    `📊 Notification broadcast complete: ${successCount} success, ${failureCount} failed`,
+    `Broadcasted notification to ${sseConnections.size} connections:`,
+    notification.type,
   );
 }
 
@@ -103,22 +86,41 @@ export function broadcastNotification(notification: any) {
  * Send notification when new report is created
  */
 export function notifyNewReport(report: Report) {
+  // Determine if this is an urgent report
+  const isUrgent =
+    report.severity === "urgent" ||
+    report.category === "medical" ||
+    report.category === "emergency" ||
+    report.status === "flagged" ||
+    (report.moderation?.isFlagged && report.moderation.confidence > 0.8);
+
   const notification = {
-    type:
-      report.severity === "urgent" || report.category === "emergency"
-        ? "urgent_report"
-        : "new_report",
+    type: isUrgent ? "urgent_report" : "new_report",
     reportId: report.id,
     category: report.category,
     severity: report.severity,
+    status: report.status,
     timestamp: new Date().toISOString(),
+    message: isUrgent
+      ? "URGENT: Immediate attention required"
+      : "New report received",
   };
+
+  console.log(
+    `Creating ${notification.type} notification for report ${report.id}`,
+  );
 
   broadcastNotification(notification);
 
   // Send email notification for urgent reports
-  if (notification.type === "urgent_report") {
-    sendEmailAlert(report);
+  if (isUrgent) {
+    console.log(`Sending urgent email alert for report ${report.id}`);
+    sendEmailAlert(report).catch((error) => {
+      console.error(
+        `Failed to send email alert for report ${report.id}:`,
+        error,
+      );
+    });
   }
 }
 
@@ -128,24 +130,41 @@ export function notifyNewReport(report: Report) {
 async function sendEmailAlert(report: Report) {
   try {
     // Import the real email service
-    const { sendEmailAlert: sendRealEmail } = await import("../email-service");
+    const { emailService } = await import("../email-service");
+
+    // Create a basic alert object for the email
+    const alert: any = {
+      reportId: report.id,
+      alertType: report.category === "medical" || report.category === "emergency" ? "emergency" : "urgent",
+      message: `${report.severity?.toUpperCase()} ${report.category} report received`,
+      severity: report.severity,
+      category: report.category
+    };
 
     // Try to send real email first
-    const emailSent = await sendRealEmail(report);
+    const emailSent = await emailService.sendAlertNotification(alert, report as any);
 
     if (emailSent) {
       console.log(
         "✅ Email alert sent successfully for urgent report:",
         report.id,
       );
+
+      // Broadcast email success notification
+      broadcastNotification({
+        type: "email_sent",
+        reportId: report.id,
+        message: "Urgent email alert sent successfully",
+        timestamp: new Date().toISOString(),
+      });
     } else {
       console.log(
         "⚠️ Email service not configured - logging notification instead",
       );
 
-      // Fallback: Log the email details
+      // Fallback: Log the email details and broadcast warning
       const emailData = {
-        to: "ritisulo@gmail.com",
+        to: process.env.EMAIL_TO || "admin@whistle.app",
         subject: `🚨 URGENT: New ${report.category} Report - ${report.id}`,
         body: `
           A new urgent harassment report has been submitted:
@@ -153,7 +172,11 @@ async function sendEmailAlert(report: Report) {
           Report ID: ${report.id}
           Category: ${report.category}
           Severity: ${report.severity}
+          Status: ${report.status}
           Submitted: ${report.created_at}
+          ${report.location ? `Location: ${report.location.latitude}, ${report.location.longitude}` : ""}
+
+          ${report.moderation?.isFlagged ? `⚠️ AI Flagged: ${report.moderation.reason}` : ""}
 
           Please log into the admin dashboard immediately to review and respond.
 
@@ -162,9 +185,26 @@ async function sendEmailAlert(report: Report) {
       };
 
       console.log("📧 Email notification (simulated):", emailData);
+
+      // Broadcast email configuration warning
+      broadcastNotification({
+        type: "email_warning",
+        reportId: report.id,
+        message: "Email service not configured - urgent report needs attention",
+        timestamp: new Date().toISOString(),
+      });
     }
   } catch (error) {
     console.error("❌ Failed to send email notification:", error);
+
+    // Broadcast email failure notification
+    broadcastNotification({
+      type: "email_error",
+      reportId: report.id,
+      message: "Failed to send urgent email alert",
+      error: error instanceof Error ? error.message : "Unknown error",
+      timestamp: new Date().toISOString(),
+    });
   }
 }
 
@@ -177,7 +217,7 @@ async function sendSMSAlert(report: Report) {
     console.log("📱 SMS alert sent for critical report:", report.id);
 
     const smsData = {
-      to: "+919791150171", // Admin phone number
+      to: "+9178885555", // Admin phone number
       message: `🚨 URGENT WHISTLE ALERT: New ${report.category} report ${report.id} requires immediate attention. Check admin dashboard now.`,
     };
 
@@ -240,8 +280,27 @@ export const getNotificationSettings: RequestHandler = (req, res) => {
     pushEnabled: true,
     urgentAlerts: true,
     categories: ["harassment", "medical", "emergency", "safety"],
-    adminEmail: "ritisulo@gmail.com",
-    adminPhone: "+919791150171",
+    adminEmail: process.env.EMAIL_TO,
+    adminPhone: "+91888888881",
+  });
+};
+
+/**
+ * Test notification stream
+ */
+export const testNotificationStream: RequestHandler = (req, res) => {
+  const testNotification = {
+    type: "test",
+    message: "Test notification from server",
+    timestamp: new Date().toISOString(),
+  };
+
+  broadcastNotification(testNotification);
+
+  res.json({
+    success: true,
+    message: "Test notification sent to all connected clients",
+    activeConnections: sseConnections.size,
   });
 };
 
@@ -250,12 +309,10 @@ export const getNotificationSettings: RequestHandler = (req, res) => {
  */
 export const testEmailService: RequestHandler = async (req, res) => {
   try {
-    const { testEmailService: testService, sendTestEmail } = await import(
-      "../email-service"
-    );
+    const { emailService } = await import("../email-service");
 
     // Test connection
-    const isConfigured = await testService();
+    const isConfigured = await emailService.testConnection();
 
     if (!isConfigured) {
       return res.status(503).json({
@@ -264,8 +321,16 @@ export const testEmailService: RequestHandler = async (req, res) => {
       });
     }
 
-    // Send test email
-    const testSent = await sendTestEmail();
+    // Send test email using the alert notification system
+    const testAlert: any = {
+      reportId: 'test-report-id',
+      alertType: 'urgent',
+      message: 'Test email notification from Whistle app',
+      severity: 'urgent',
+      category: 'feedback'
+    };
+
+    const testSent = await emailService.sendAlertNotification(testAlert);
 
     if (testSent) {
       res.json({
