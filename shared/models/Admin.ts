@@ -4,8 +4,8 @@ import mongoose, { Document, Schema, Model } from "mongoose";
  * Admin Role Enumeration for role-based access control
  */
 export enum AdminRole {
-  MODERATOR = "moderator",
-  SUPERADMIN = "superadmin"
+  PRIMARY = "primary",
+  SECONDARY = "secondary"
 }
 
 /**
@@ -14,7 +14,7 @@ export enum AdminRole {
 export interface IAdmin extends Document {
   _id: mongoose.Types.ObjectId;
   username: string;
-  password: string;
+  passwordHash: string; // Changed from password to passwordHash for clarity
   email: string;
   role: AdminRole;
   firstName?: string;
@@ -39,10 +39,10 @@ const adminSchema: Schema<IAdmin> = new Schema({
     minlength: 3,
     maxlength: 50
   },
-  password: { 
+  passwordHash: { // Changed from password to passwordHash for clarity
     type: String, 
     required: true,
-    select: false // Don't include password in queries by default
+    select: false // Don't include password hash in queries by default
   },
   email: {
     type: String,
@@ -56,7 +56,7 @@ const adminSchema: Schema<IAdmin> = new Schema({
     type: String,
     enum: Object.values(AdminRole),
     required: true,
-    default: AdminRole.MODERATOR
+    default: AdminRole.SECONDARY
   },
   firstName: {
     type: String,
@@ -114,4 +114,57 @@ adminSchema.statics.findByRole = function(role: AdminRole) {
  */
 // Export model with dev mode protection
 const AdminModel: Model<IAdmin> = mongoose.models.Admin || mongoose.model<IAdmin>("Admin", adminSchema);
+
+// Admin credentials configuration for initial setup
+export const ADMIN_ACCOUNTS = [
+  {
+    username: 'ritika',
+    password: 'satoru2624',
+    role: AdminRole.PRIMARY,
+    email: 'ritika.admin@whistle.app'
+  },
+  {
+    username: 'admin1',
+    password: 'admin@123',
+    role: AdminRole.SECONDARY,
+    email: 'admin1@whistle.app'
+  },
+  {
+    username: 'admin2',
+    password: 'admin@123',
+    role: AdminRole.SECONDARY,
+    email: 'admin2@whistle.app'
+  },
+  {
+    username: 'admin3',
+    password: 'admin@123',
+    role: AdminRole.SECONDARY,
+    email: 'admin3@whistle.app'
+  }
+] as const;
+
+// Type definitions for admin authentication
+export interface AdminLoginRequest {
+  username: string;
+  password: string;
+}
+
+export interface AdminLoginResponse {
+  success: boolean;
+  token?: string;
+  admin?: {
+    username: string;
+    role: AdminRole;
+    email?: string;
+  };
+  message?: string;
+}
+
+export interface CreateAdminRequest {
+  username: string;
+  password: string;
+  role: AdminRole;
+  email?: string;
+}
+
 export default AdminModel;

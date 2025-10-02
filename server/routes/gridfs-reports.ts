@@ -6,8 +6,11 @@ import {
 } from "../../shared/api";
 import ReportModel from "../../shared/models/report";
 import AlertModel from "../../shared/models/Alert";
-import { uploadFields } from "../utils/gridfs";
+import { uploadFields, getFile, getDecryptedFile } from "../utils/gridfs";
 import { notifyNewReport } from "./notifications";
+import { processLocationData } from "../utils/location-processor";
+import { sendUrgentReportNotifications } from "../utils/notifications";
+import { broadcastToAdmins } from "../utils/realtime";
 
 /**
  * GridFS Report Creation Handler
@@ -103,13 +106,17 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
         });
       }
 
-      // Parse location if provided
-      let parsedLocation;
+      // Parse and process location if provided
+      let processedLocation = null;
       if (share_location === 'true' && location) {
-        try {
-          parsedLocation = JSON.parse(location);
-        } catch (error) {
-          console.warn("Failed to parse location:", error);
+        processedLocation = processLocationData(location);
+        if (processedLocation) {
+          console.log("📍 Enhanced location data processed:", {
+            coordinates: `${processedLocation.lat}, ${processedLocation.lng}`,
+            source: processedLocation.source,
+            city: processedLocation.city,
+            country: processedLocation.country
+          });
         }
       }
 
@@ -123,7 +130,7 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
         severity: severity || "medium",
         imageFileIds: imageFileIds.length > 0 ? imageFileIds : undefined,
         videoFileIds: videoFileIds.length > 0 ? videoFileIds : undefined,
-        location: parsedLocation,
+        location: processedLocation,
         moderation,
         is_offline_sync: is_offline_sync === 'true',
         status: "pending" as const,
@@ -164,6 +171,37 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
         await alert.save();
         console.log("🚨 Alert created for urgent report");
 
+        // Send urgent notifications via email/SMS
+        try {
+          await sendUrgentReportNotifications({
+            _id: savedReport._id.toString(),
+            shortId: savedReport.shortId,
+            category,
+            severity: severity || "high",
+            message: savedReport.message,
+            location: reportData.location || undefined,
+            timestamp: new Date()
+          });
+          console.log("📧 Urgent notifications sent successfully");
+        } catch (notifyError) {
+          console.error("❌ Failed to send urgent notifications:", notifyError);
+        }
+
+        // Broadcast to admin dashboard in real-time
+        try {
+          broadcastToAdmins('urgent-report', {
+            reportId: savedReport._id.toString(),
+            shortId: savedReport.shortId,
+            category,
+            severity: severity || "high",
+            message: savedReport.message,
+            created_at: new Date().toISOString()
+          });
+          console.log("📡 Real-time broadcast sent to admin dashboard");
+        } catch (broadcastError) {
+          console.error("❌ Failed to broadcast to admins:", broadcastError);
+        }
+
         // Send notifications
         try {
           // Convert to Report interface format for notifications
@@ -174,8 +212,8 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
             category: savedReport.category,
             severity: savedReport.severity,
             status: savedReport.status,
-            created_at: savedReport.created_at.toISOString(),
-            updated_at: savedReport.updated_at.toISOString(),
+            created_at: (savedReport.created_at || savedReport.createdAt)?.toISOString() || new Date().toISOString(),
+            updated_at: (savedReport.updated_at || savedReport.updatedAt)?.toISOString() || new Date().toISOString(),
           };
           await notifyNewReport(reportForNotification as any);
         } catch (notifyError) {
@@ -189,17 +227,21 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
         id: savedReport._id.toString(),
         shortId: savedReport.shortId,
         message: savedReport.message,
-        created_at: savedReport.created_at.toISOString(),
+        created_at: (savedReport.created_at || savedReport.createdAt)?.toISOString() || new Date().toISOString(),
       };
 
       res.status(201).json({
-        ...response,
         success: true,
-        category: savedReport.category,
-        severity: savedReport.severity,
-        status: savedReport.status,
-        imageFiles: imageFileIds.length,
-        videoFiles: videoFileIds.length,
+        data: {
+          _id: savedReport._id.toString(),
+          id: savedReport._id.toString(), // For backward compatibility
+          shortId: savedReport.shortId,
+          is_encrypted: savedReport.is_encrypted,
+          imageFiles: imageFileIds.length,
+          videoFiles: videoFileIds.length,
+          locationAccuracy: savedReport.location?.accuracy
+        },
+        message: "Report submitted successfully",
       });
 
     } catch (error) {
@@ -213,33 +255,33 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
 };
 
 /**
- * Get file from GridFS by ID
+ * Get file from GridFS by ID with automatic decryption
  */
 export const getGridFSFile: RequestHandler = async (req, res) => {
   try {
     const { fileId } = req.params;
+    console.log(`📁 Serving file: ${fileId}`);
     
-    // Import getFile function here to avoid circular imports
-    const { getFile } = await import("../utils/gridfs");
-    
-    const { stream, file } = await getFile(fileId);
+    // Get decrypted file content
+    const { buffer, metadata, filename, contentType } = await getDecryptedFile(fileId);
     
     // Set headers for file streaming
     res.set({
-      'Content-Type': file.contentType,
-      'Content-Length': file.length.toString(),
-      'Content-Disposition': `inline; filename="${file.filename}"`,
+      'Content-Type': contentType,
+      'Content-Disposition': `inline; filename="${filename}"`,
       'Cache-Control': 'private, max-age=3600',
+      'Content-Length': buffer.length.toString(),
     });
 
-    // Stream file to response
-    stream.pipe(res);
+    // Send decrypted file buffer
+    res.send(buffer);
     
-    console.log("📤 File served:", {
+    console.log("📤 Decrypted file served:", {
       fileId,
-      filename: file.filename,
-      size: file.length,
-      contentType: file.contentType,
+      filename,
+      contentType,
+      size: buffer.length,
+      encrypted: metadata?.encrypted || false
     });
 
   } catch (error) {

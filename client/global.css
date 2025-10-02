@@ -1,3 +1,4 @@
+@import 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -114,4 +115,74 @@
       hsl(214 100% 35% / 0.05) 100%
     );
   }
+}
+
+/* Leaflet Map Styles */
+.leaflet-container {
+  width: 100%;
+  height: 100%;
+  background: #ddd;
+  outline: 0;
+}
+
+.leaflet-map-pane,
+.leaflet-tile,
+.leaflet-marker-icon,
+.leaflet-marker-shadow,
+.leaflet-tile-container,
+.leaflet-pane > svg,
+.leaflet-pane > canvas,
+.leaflet-zoom-box,
+.leaflet-image-layer,
+.leaflet-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+.leaflet-container .leaflet-control-zoom {
+  background: white;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  margin-left: 10px;
+  margin-top: 10px;
+}
+
+.leaflet-control-zoom-in,
+.leaflet-control-zoom-out {
+  background: white;
+  border: none;
+  width: 30px;
+  height: 30px;
+  font-size: 18px;
+  line-height: 30px;
+  text-align: center;
+  color: black;
+  cursor: pointer;
+}
+
+.leaflet-control-zoom-in:hover,
+.leaflet-control-zoom-out:hover {
+  background: #f4f4f4;
+}
+
+.leaflet-clickable {
+  cursor: pointer;
+}
+
+.leaflet-interactive {
+  cursor: crosshair;
+}
+
+.leaflet-popup-content-wrapper {
+  background: white;
+  color: #333;
+  border-radius: 4px;
+  padding: 6px;
+}
+
+.leaflet-popup-tip {
+  background: white;
+  color: #333;
+  box-shadow: 0 3px 14px rgba(0,0,0,0.15);
 }

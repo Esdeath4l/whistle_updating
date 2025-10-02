@@ -34,7 +34,7 @@ const SMTP_PASS = process.env.SMTP_PASS || process.env.EMAIL_PASS || '';
 const FROM_EMAIL = process.env.FROM_EMAIL || process.env.SMTP_USER || 'noreply@whistle.local';
 const FROM_NAME = process.env.FROM_NAME || 'Whistle Security System';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@whistle.local';
-const ADMIN_PHONE = process.env.ADMIN_PHONE || '';
+const ADMIN_PHONE = process.env.ADMIN_PHONE_NUMBER || process.env.ADMIN_PHONE || '';
 
 // ================================================================================================
 // INTERFACES AND TYPES
@@ -228,8 +228,7 @@ export const sendEmailNotification = async (notification: NotificationData): Pro
 // ================================================================================================
 
 /**
- * Send SMS notification for urgent reports
- * Note: This is a placeholder implementation - integrate with your SMS provider
+ * Send SMS notification for urgent reports using Twilio
  */
 export const sendSMSNotification = async (notification: NotificationData): Promise<boolean> => {
   try {
@@ -243,24 +242,69 @@ export const sendSMSNotification = async (notification: NotificationData): Promi
     // SMS content
     const smsMessage = `WHISTLE ALERT: ${notification.priority.toUpperCase()} priority report ${notification.shortId}. Category: ${notification.category}. Check dashboard immediately.`;
     
-    // TODO: Integrate with SMS provider (Twilio, AWS SNS, etc.)
-    // Example for Twilio:
-    /*
-    const twilio = require('twilio');
-    const client = twilio(process.env.TWILIO_SID, process.env.TWILIO_TOKEN);
+    // Check if using Twilio
+    const smsProvider = process.env.SMS_PROVIDER;
     
-    await client.messages.create({
-      body: smsMessage,
-      from: process.env.TWILIO_PHONE,
-      to: ADMIN_PHONE
-    });
-    */
-    
-    console.log('📱 SMS notification sent successfully');
-    console.log(`SMS content: ${smsMessage}`);
-    console.log(`Recipient: ${ADMIN_PHONE}`);
-    
-    return true;
+    if (smsProvider === 'twilio') {
+      const twilio = require('twilio');
+      const accountSid = process.env.TWILIO_ACCOUNT_SID;
+      const authToken = process.env.TWILIO_AUTH_TOKEN;
+      const apiKey = process.env.TWILIO_API_KEY;
+      const apiSecret = process.env.TWILIO_API_SECRET;
+      const fromNumber = process.env.TWILIO_FROM_NUMBER;
+      const messagingServiceSid = process.env.TWILIO_MESSAGING_SERVICE_SID;
+      
+      if (!accountSid) {
+        console.log('⚠️  Twilio Account SID not configured');
+        return false;
+      }
+      
+      // Initialize Twilio client with either Auth Token or API Key
+      let client;
+      if (apiKey && apiSecret) {
+        console.log('📱 Using Twilio API Key authentication');
+        client = twilio(apiKey, apiSecret, { accountSid });
+      } else if (authToken && authToken !== '[AuthToken]') {
+        console.log('📱 Using Twilio Auth Token authentication');
+        client = twilio(accountSid, authToken);
+      } else {
+        console.log('⚠️  Twilio credentials not properly configured');
+        return false;
+      }
+      
+      // Use messaging service if available, otherwise use from number
+      const messageOptions: any = {
+        body: smsMessage,
+        to: ADMIN_PHONE
+      };
+      
+      if (messagingServiceSid) {
+        messageOptions.messagingServiceSid = messagingServiceSid;
+        console.log('📱 Using Twilio Messaging Service');
+      } else if (fromNumber) {
+        messageOptions.from = fromNumber;
+        console.log('📱 Using Twilio phone number');
+      } else {
+        console.log('⚠️  No Twilio from number or messaging service configured');
+        return false;
+      }
+      
+      const message = await client.messages.create(messageOptions);
+      
+      console.log('📱 Twilio SMS sent successfully');
+      console.log(`Message SID: ${message.sid}`);
+      console.log(`To: ${ADMIN_PHONE}`);
+      console.log(`Status: ${message.status}`);
+      console.log(`Content: ${smsMessage}`);
+      
+      return true;
+    } else {
+      // Fallback to HTTP provider or log message
+      console.log('📱 SMS notification (simulated) sent successfully');
+      console.log(`SMS content: ${smsMessage}`);
+      console.log(`Recipient: ${ADMIN_PHONE}`);
+      return true;
+    }
   } catch (error) {
     console.error('❌ Failed to send SMS notification:', error);
     return false;
@@ -434,5 +478,35 @@ export const testEmailNotification = async (req: Request, res: Response): Promis
       success: false,
       error: 'Failed to send test email'
     });
+  }
+};
+
+/**
+ * Notify about report status updates
+ */
+export const notifyReportUpdate = (reportId: string, updateData: any): void => {
+  try {
+    console.log(`🔄 Notifying about report update: ${reportId}`);
+    
+    const dashboardNotification: DashboardNotification = {
+      id: `update-${reportId}-${Date.now()}`,
+      title: 'Report Updated',
+      message: `Report ${reportId} has been updated`,
+      priority: 'medium',
+      timestamp: new Date(),
+      sound: true,
+      data: {
+        type: 'report_updated',
+        reportId,
+        updateData
+      }
+    };
+
+    // Broadcast to all connected dashboard clients
+    broadcastDashboardNotification(dashboardNotification);
+    
+    console.log(`✅ Report update notification sent for: ${reportId}`);
+  } catch (error) {
+    console.error('❌ Error sending report update notification:', error);
   }
 };

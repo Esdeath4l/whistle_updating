@@ -1,15 +1,19 @@
 import { RequestHandler } from "express";
 import ReportModel from "../../shared/models/report";
+import AlertModel from "../../shared/models/Alert";
 import { uploadFields } from "../utils/gridfs";
+import { DataEncryption } from "../utils/encryption";
 import { 
-  encryptReportData, 
   encryptSensitiveData,
+  decryptSensitiveData,
   EncryptedData 
 } from "../middleware/authMiddleware";
 import { 
   processReportNotification, 
   NotificationData 
 } from "../utils/notificationHelpers";
+import { sendUrgentReportNotifications } from "../utils/notifications";
+import { broadcastToAdmins, notifyNewReport } from "../utils/realtime";
 import mongoose from "mongoose";
 
 /**
@@ -47,7 +51,14 @@ async function processReportCreation(req: any, res: any) {
     console.log("📥 Request body:", JSON.stringify(req.body, null, 2));
     console.log("📁 Files:", req.files ? Object.keys(req.files) : "None");
     
-    const { message, location } = req.body;
+    const { 
+      message, 
+      location, 
+      category, 
+      severity, 
+      is_encrypted, 
+      share_location 
+    } = req.body;
     
     if (!message || typeof message !== 'string' || message.trim() === '') {
       console.log("❌ Validation failed: Missing or empty message");
@@ -58,20 +69,64 @@ async function processReportCreation(req: any, res: any) {
     }
     
     console.log("✅ Message validation passed:", message.substring(0, 50) + "...");
+    console.log("🔒 Encryption flag:", is_encrypted);
     
-    const reportData: any = { message: message.trim() };
+    const reportData: any = {
+      category: category || 'feedback',
+      severity: severity || 'medium',
+      is_encrypted: is_encrypted === 'true' || is_encrypted === true,
+      share_location: share_location === 'true' || share_location === true
+    };
     
-    if (location) {
+    // Handle encryption
+    if (reportData.is_encrypted) {
+      try {
+        console.log("🔐 Encrypting report data...");
+        const encrypted = encryptSensitiveData(message.trim());
+        reportData.encrypted_message = encrypted.encryptedData;
+        reportData.encryption_iv = encrypted.iv;
+        reportData.encryption_auth_tag = encrypted.authTag;
+        reportData.message = "Encrypted"; // Keep a placeholder instead of empty string
+        console.log("✅ Report data encrypted successfully");
+      } catch (encryptionError) {
+        console.error("❌ Encryption failed:", encryptionError);
+        // Fallback to plaintext if encryption fails
+        reportData.message = message.trim();
+        reportData.is_encrypted = false;
+        console.log("⚠️ Falling back to plaintext storage");
+      }
+    } else {
+      console.log("📝 Storing report as plaintext (encryption disabled)");
+      reportData.message = message.trim();
+    }
+    
+    // Handle location data
+    if (location && reportData.share_location) {
       try {
         let locationData = typeof location === 'string' ? JSON.parse(location) : location;
-        if (locationData && typeof locationData.lat === 'number' && typeof locationData.lng === 'number') {
-          reportData.location = { lat: locationData.lat, lng: locationData.lng };
+        console.log("📍 Processing location data:", locationData);
+        
+        if (locationData && typeof locationData.latitude === 'number' && typeof locationData.longitude === 'number') {
+          reportData.location = {
+            latitude: locationData.latitude,
+            longitude: locationData.longitude,
+            accuracy: locationData.accuracy || 0,
+            timestamp: locationData.timestamp || Date.now(),
+            address: locationData.address || '',
+            source: locationData.source || 'browser_gps'
+          };
+          console.log("✅ Location data processed:", {
+            lat: reportData.location.latitude,
+            lng: reportData.location.longitude,
+            accuracy: reportData.location.accuracy
+          });
         }
       } catch (error) {
         console.warn("⚠️ Failed to parse location data:", error);
       }
     }
     
+    // Handle file uploads
     if (req.files) {
       const files = req.files as { [fieldname: string]: Express.Multer.File[] };
       
@@ -79,6 +134,7 @@ async function processReportCreation(req: any, res: any) {
         const imageFile = files.image[0] as any;
         if (imageFile.id) {
           reportData.photo_file_id = new mongoose.Types.ObjectId(imageFile.id);
+          console.log("📸 Image file linked:", imageFile.id);
         }
       }
       
@@ -86,21 +142,134 @@ async function processReportCreation(req: any, res: any) {
         const videoFile = files.video[0] as any;
         if (videoFile.id) {
           reportData.video_file_id = new mongoose.Types.ObjectId(videoFile.id);
+          console.log("🎥 Video file linked:", videoFile.id);
         }
       }
     }
     
+    console.log("💾 Saving report to MongoDB...");
     const report = new ReportModel(reportData);
     const savedReport = await report.save();
+    
+    console.log("✅ Report saved successfully:", {
+      id: savedReport._id.toString(),
+      shortId: savedReport.shortId,
+      encrypted: savedReport.is_encrypted,
+      hasLocation: !!savedReport.location,
+      hasFiles: !!(savedReport.photo_file_id || savedReport.video_file_id)
+    });
+
+    // =======================================
+    // REAL-TIME DASHBOARD NOTIFICATION
+    // =======================================
+    
+    /**
+     * Send real-time notification to admin dashboard with all required details
+     * Includes shortId, priority, timestamp, location, and media information
+     */
+    try {
+      const notificationData = {
+        shortId: savedReport.shortId,
+        priority: reportData.severity || reportData.priority || 'medium',
+        severity: reportData.severity || 'medium',
+        category: reportData.category || reportData.type || 'other',
+        timestamp: savedReport.createdAt?.toISOString() || new Date().toISOString(),
+        location: reportData.location ? {
+          latitude: reportData.location.latitude || reportData.location.lat,
+          longitude: reportData.location.longitude || reportData.location.lng,
+          address: reportData.location.address
+        } : undefined,
+        hasMedia: !!(savedReport.photo_file_id || savedReport.video_file_id),
+        isEncrypted: savedReport.is_encrypted || false
+      };
+      
+      // Send real-time notification to all connected admin clients
+      notifyNewReport(notificationData);
+      console.log("📡 Real-time notification sent to admin dashboard");
+      
+    } catch (notificationError) {
+      console.error("❌ Failed to send real-time notification:", notificationError);
+      // Don't fail the request if notification fails
+    }
+
+    // Create alert and send notifications for urgent reports
+    if (reportData.severity === "urgent" || 
+        reportData.category === "medical" || 
+        reportData.category === "emergency") {
+      
+      const alert = new AlertModel({
+        reportId: savedReport._id,
+        alertType: reportData.category === "medical" ? "emergency" : "urgent",
+        message: `${reportData.severity?.toUpperCase()} ${reportData.category.replace("_", " ")} report received`,
+        severity: reportData.severity || "high",
+        category: reportData.category,
+        created_at: new Date(),
+      });
+
+      await alert.save();
+      console.log("🚨 Alert created for urgent report");
+
+      // Send urgent notifications via email/SMS
+      try {
+        await sendUrgentReportNotifications({
+          _id: savedReport._id.toString(),
+          shortId: savedReport.shortId,
+          category: reportData.category,
+          severity: reportData.severity || "high",
+          message: reportData.is_encrypted ? "New encrypted urgent report received" : reportData.message,
+          location: reportData.location || undefined,
+          timestamp: new Date()
+        });
+        console.log("📧 Urgent notifications sent successfully");
+      } catch (notifyError) {
+        console.error("❌ Failed to send urgent notifications:", notifyError);
+      }
+
+      // Broadcast to admin dashboard in real-time
+      try {
+        broadcastToAdmins('urgent-report', {
+          reportId: savedReport._id.toString(),
+          shortId: savedReport.shortId,
+          category: reportData.category,
+          severity: reportData.severity || "high",
+          message: reportData.is_encrypted ? "New encrypted urgent report received" : reportData.message,
+          created_at: new Date().toISOString()
+        });
+        console.log("📡 Real-time broadcast sent to admin dashboard");
+      } catch (broadcastError) {
+        console.error("❌ Failed to broadcast to admins:", broadcastError);
+      }
+    }
+
+    // Send notification to admins about new report
+    try {
+      const notificationData: NotificationData = {
+        reportId: savedReport._id.toString(),
+        shortId: savedReport.shortId,
+        message: reportData.is_encrypted ? "New encrypted report received" : message.substring(0, 100),
+        category: reportData.category,
+        priority: reportData.severity === 'urgent' ? 'urgent' : 
+                 reportData.severity === 'high' ? 'high' : 'medium',
+        timestamp: new Date(),
+        hasMedia: !!(savedReport.photo_file_id || savedReport.video_file_id)
+      };
+      
+      processReportNotification(notificationData);
+      console.log("📢 Admin notification sent");
+    } catch (notificationError) {
+      console.warn("⚠️ Failed to send notification:", notificationError);
+    }
     
     res.status(201).json({
       success: true,
       data: {
-        id: savedReport._id.toString(),
+        _id: savedReport._id.toString(),
+        id: savedReport._id.toString(), // For backward compatibility
         shortId: savedReport.shortId,
+        is_encrypted: savedReport.is_encrypted,
         imageFiles: req.files?.image ? req.files.image.length : 0,
         videoFiles: req.files?.video ? req.files.video.length : 0,
-        locationAccuracy: reportData.location ? 0 : undefined
+        locationAccuracy: reportData.location?.accuracy
       },
       message: "Report submitted successfully",
     });
@@ -117,7 +286,7 @@ async function processReportCreation(req: any, res: any) {
     
     res.status(500).json({
       success: false,
-      error: "Internal server error. Please try again.",
+      error: "Failed to create report",
     });
   }
 }
@@ -199,6 +368,70 @@ export const getReports: RequestHandler = async (req, res) => {
       success: false,
       error: "Failed to fetch reports",
       details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+};
+
+export const getReportByShortId: RequestHandler = async (req, res) => {
+  try {
+    // Handle both parameter names: :id and :shortId
+    const reportId = req.params.id || req.params.shortId;
+    console.log(`📋 Fetching report by ID: ${reportId}`);
+    
+    // Try to find by shortId first, then by MongoDB ObjectId
+    let report = await ReportModel.findOne({ shortId: reportId })
+      .select('+message_encrypted +message_iv +message_salt +location_encrypted +location_iv +location_salt +reporterEmail_encrypted +reporterEmail_iv +reporterEmail_salt +admin_notes_encrypted +admin_notes_iv +admin_notes_salt +encrypted_message +encryption_iv +encryption_auth_tag +encrypted_data')
+      .lean();
+    
+    // If not found by shortId, try MongoDB ObjectId
+    if (!report && mongoose.Types.ObjectId.isValid(reportId)) {
+      console.log(`🔍 Not found by shortId, trying ObjectId: ${reportId}`);
+      report = await ReportModel.findById(reportId)
+        .select('+message_encrypted +message_iv +message_salt +location_encrypted +location_iv +location_salt +reporterEmail_encrypted +reporterEmail_iv +reporterEmail_salt +admin_notes_encrypted +admin_notes_iv +admin_notes_salt +encrypted_message +encryption_iv +encryption_auth_tag +encrypted_data')
+        .lean();
+    }
+    
+    if (!report) {
+      console.log(`❌ Report not found with ID: ${reportId}`);
+      return res.status(404).json({
+        success: false,
+        error: "Report not found"
+      });
+    }
+
+    // Decrypt report data using the new decryption utility
+    console.log(`🔓 Decrypting report: ${report.shortId}`);
+    const decryptedReport = await DataEncryption.decryptReportDocument(report);
+
+    // Format response data
+    const responseData = {
+      _id: report._id.toString(),
+      id: report._id.toString(), // For backward compatibility
+      shortId: report.shortId,
+      message: decryptedReport.message || '[NO MESSAGE]',
+      category: report.category,
+      severity: report.severity,
+      status: report.status || 'pending',
+      location: decryptedReport.location,
+      photo_file_id: report.photo_file_id,
+      video_file_id: report.video_file_id,
+      is_encrypted: report.is_encrypted,
+      created_at: report.created_at || report.createdAt,
+      updated_at: report.updated_at || report.updatedAt
+    };
+
+    console.log(`✅ Report retrieved and decrypted successfully: ${report.shortId} (searched by: ${reportId})`);
+    res.json({
+      success: true,
+      data: responseData,
+      message: "Report retrieved successfully"
+    });
+
+  } catch (error: any) {
+    console.error("❌ Error fetching report by ID:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch report"
     });
   }
 };

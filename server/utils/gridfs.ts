@@ -135,7 +135,6 @@ export const initializeGridFSBucket = async (): Promise<GridFSBucket> => {
         chunkSizeBytes: 1024 * 1024 // 1MB chunks
       });
 
-      console.log('✅ GridFS bucket initialized successfully');
       resolve(gridFSBucket);
 
     } catch (error) {
@@ -446,7 +445,7 @@ export const uploadFileToGridFS = async (
 // ================================================================================================
 
 /**
- * Get file from GridFS by ID with decryption support
+ * Get file from GridFS by ID with automatic decryption
  */
 export const getFile = async (fileId: string | ObjectId) => {
   try {
@@ -472,6 +471,74 @@ export const getFile = async (fileId: string | ObjectId) => {
     };
   } catch (error) {
     console.error('❌ Error retrieving file from GridFS:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get decrypted file from GridFS by ID
+ * Returns the actual file content as Buffer for proper decryption
+ */
+export const getDecryptedFile = async (fileId: string | ObjectId): Promise<{
+  buffer: Buffer;
+  metadata: any;
+  filename: string;
+  contentType: string;
+}> => {
+  try {
+    const gridBucket = await initializeGridFSBucket();
+    const objectId = typeof fileId === 'string' ? new ObjectId(fileId) : fileId;
+    
+    const files = await gridBucket.find({ _id: objectId }).toArray();
+    if (files.length === 0) {
+      throw new Error(`File not found: ${objectId}`);
+    }
+    
+    const file = files[0];
+    const downloadStream = gridBucket.openDownloadStream(objectId);
+    
+    // Read the entire file into buffer
+    const chunks: Uint8Array[] = [];
+    return new Promise((resolve, reject) => {
+      downloadStream.on('data', (chunk: Uint8Array) => {
+        chunks.push(chunk);
+      });
+      
+      downloadStream.on('end', () => {
+        try {
+          const encryptedBuffer = Buffer.concat(chunks);
+          let finalBuffer = encryptedBuffer;
+          
+          // Decrypt if the file was encrypted
+          if (file.metadata?.encrypted && file.metadata?.encryptionIV && file.metadata?.encryptionAuthTag) {
+            console.log(`🔓 Decrypting file: ${file.filename}`);
+            finalBuffer = decryptBuffer(
+              encryptedBuffer, 
+              file.metadata.encryptionIV, 
+              file.metadata.encryptionAuthTag
+            );
+            console.log(`✅ File decrypted successfully: ${file.filename}`);
+          }
+          
+          resolve({
+            buffer: finalBuffer,
+            metadata: file.metadata,
+            filename: file.filename,
+            contentType: file.metadata?.mimeType || 'application/octet-stream'
+          });
+        } catch (error) {
+          console.error('❌ Error decrypting file:', error);
+          reject(error);
+        }
+      });
+      
+      downloadStream.on('error', (error) => {
+        console.error('❌ Error reading file stream:', error);
+        reject(error);
+      });
+    });
+  } catch (error) {
+    console.error('❌ Error retrieving encrypted file from GridFS:', error);
     throw error;
   }
 };
@@ -518,7 +585,6 @@ export const getFileInfo = async (fileId: string | ObjectId) => {
 
 // Initialize GridFS when MongoDB connects
 mongoose.connection.on('connected', () => {
-  console.log('🔗 MongoDB connected, initializing GridFS...');
   initializeGridFSBucket().catch(error => {
     console.error('❌ Failed to initialize GridFS on connection:', error);
   });

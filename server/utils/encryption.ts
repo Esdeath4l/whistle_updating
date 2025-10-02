@@ -168,7 +168,88 @@ export class DataEncryption {
    * @returns Report object with decrypted sensitive fields
    */
   static decryptReportData(report: any): any {
-    const sensitiveFields = ['message', 'location'];
+    const sensitiveFields = ['message', 'location', 'reporterEmail', 'admin_notes'];
     return this.decryptSensitiveFields(report, sensitiveFields);
+  }
+
+  /**
+   * Decrypt a single report document with comprehensive field handling
+   * @param report - Report document from MongoDB
+   * @returns Report with decrypted fields
+   */
+  static async decryptReportDocument(report: any): Promise<any> {
+    if (!report || !report.is_encrypted) {
+      return report;
+    }
+
+    const decrypted = { ...report.toObject ? report.toObject() : report };
+    
+    try {
+      // Decrypt message
+      if (report.message_encrypted && report.message_iv) {
+        decrypted.message = this.decrypt({
+          encrypted: report.message_encrypted,
+          iv: report.message_iv,
+          salt: report.message_salt
+        });
+      }
+      
+      // Decrypt location
+      if (report.location_encrypted && report.location_iv) {
+        const locationStr = this.decrypt({
+          encrypted: report.location_encrypted,
+          iv: report.location_iv,
+          salt: report.location_salt
+        });
+        decrypted.location = JSON.parse(locationStr);
+      }
+      
+      // Decrypt reporter email
+      if (report.reporterEmail_encrypted && report.reporterEmail_iv) {
+        decrypted.reporterEmail = this.decrypt({
+          encrypted: report.reporterEmail_encrypted,
+          iv: report.reporterEmail_iv,
+          salt: report.reporterEmail_salt
+        });
+      }
+      
+      // Decrypt admin notes
+      if (report.admin_notes_encrypted && report.admin_notes_iv) {
+        decrypted.admin_notes = this.decrypt({
+          encrypted: report.admin_notes_encrypted,
+          iv: report.admin_notes_iv,
+          salt: report.admin_notes_salt
+        });
+      }
+
+      // Clean up encrypted fields from response
+      delete decrypted.message_encrypted;
+      delete decrypted.message_iv;
+      delete decrypted.message_salt;
+      delete decrypted.location_encrypted;
+      delete decrypted.location_iv;
+      delete decrypted.location_salt;
+      delete decrypted.reporterEmail_encrypted;
+      delete decrypted.reporterEmail_iv;
+      delete decrypted.reporterEmail_salt;
+      delete decrypted.admin_notes_encrypted;
+      delete decrypted.admin_notes_iv;
+      delete decrypted.admin_notes_salt;
+      
+      return decrypted;
+      
+    } catch (error) {
+      console.error('❌ Failed to decrypt report document:', error);
+      return decrypted; // Return original if decryption fails
+    }
+  }
+
+  /**
+   * Decrypt multiple report documents
+   * @param reports - Array of report documents
+   * @returns Array of decrypted reports
+   */
+  static async decryptReportArray(reports: any[]): Promise<any[]> {
+    return Promise.all(reports.map(report => this.decryptReportDocument(report)));
   }
 }

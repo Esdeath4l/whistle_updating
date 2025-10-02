@@ -36,7 +36,16 @@ function expressPlugin(): Plugin {
         try {
           const connectDB = (await import("./shared/db")).default;
           await connectDB();
-          console.log("🎯 MongoDB connected in dev mode");
+          
+          // Initialize admin accounts after MongoDB connection
+          const { AdminService } = await import("./server/utils/admin-service");
+          await AdminService.initializeAdminAccounts();
+          
+          // Initialize escalation service
+          const { EscalationService } = await import("./server/utils/escalation-service");
+          EscalationService.initialize();
+          EscalationService.startEscalationMonitoring();
+          
         } catch (error) {
           console.error("❌ MongoDB connection failed in dev mode:", error.message);
           console.log("⚠️  Continuing with in-memory storage for development");
@@ -44,7 +53,7 @@ function expressPlugin(): Plugin {
       })();
       
       const { createServer } = await import("./server");
-      const app = createServer();
+      const { app } = createServer();
       
       // Add debugging middleware
       app.use((req, res, next) => {

@@ -11,6 +11,10 @@ export interface Report {
   imageFileIds?: string[]; // GridFS file IDs for images
   videoFileIds?: string[]; // GridFS file IDs for videos
   
+  // Legacy URL fields for backward compatibility
+  photo_url?: string;
+  video_url?: string;
+  
   video_metadata?: VideoMetadata;
   created_at: string;
   status: ReportStatus;
@@ -106,6 +110,10 @@ export interface CreateReportRequest {
   message: string;
   category: ReportCategory;
   severity?: ReportSeverity;
+  // Legacy fields for backward compatibility
+  photo_url?: string;
+  video_url?: string;
+  video_metadata?: VideoMetadata;
   // For encrypted submissions
   encrypted_data?: EncryptedReportData;
   is_encrypted?: boolean;
@@ -133,6 +141,12 @@ export interface ReportStatusResponse {
   created_at: string;
   admin_response?: string;
   admin_response_at?: string;
+  // Additional fields for better display
+  message?: string;
+  category?: ReportCategory;
+  severity?: ReportSeverity;
+  location?: LocationData;
+  is_encrypted?: boolean;
 }
 
 export interface UpdateReportRequest {

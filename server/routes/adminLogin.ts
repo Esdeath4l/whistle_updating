@@ -1,22 +1,18 @@
 import { Request, Response } from 'express';
-import {
-  validateAdminCredentials,
-  generateAccessToken,
-  generateRefreshToken,
-  AuthRequest,
-  LoginCredentials
-} from '../middleware/authMiddleware';
+import { AdminService } from '../utils/admin-service';
+import { AdminLoginRequest } from '../../shared/models/Admin';
 
 /**
  * ================================================================================================
- * WHISTLE - ADMIN LOGIN ROUTE
+ * WHISTLE - MULTI-ADMIN LOGIN ROUTE
  * ================================================================================================
  * 
- * Secure admin authentication endpoint using environment-based credentials
+ * Enhanced admin authentication endpoint supporting multiple admin accounts
  * Features:
- * - Environment variable based email/password validation
- * - bcrypt password comparison for security
- * - JWT token generation with proper expiration
+ * - MongoDB-based admin account management
+ * - bcrypt password hashing and verification
+ * - Role-based authentication (primary/secondary)
+ * - JWT token generation with role information
  * - Comprehensive logging and error handling
  * - Security-focused response format
  * 
@@ -32,9 +28,10 @@ import {
  */
 export const adminLogin = async (req: Request, res: Response): Promise<void> => {
   try {
-    console.log('🔐 Admin login attempt initiated');
+    console.log('🔐 Multi-admin login attempt initiated');
     
-    const { username, password }: LoginCredentials = req.body;
+    const loginRequest: AdminLoginRequest = req.body;
+    const { username, password } = loginRequest;
     
     // Validate request payload
     if (!username || !password) {
@@ -50,50 +47,29 @@ export const adminLogin = async (req: Request, res: Response): Promise<void> => 
     const clientIP = req.ip || req.socket.remoteAddress || 'unknown';
     console.log(`🔍 Login attempt from IP: ${clientIP} for username: ${username}`);
     
-    // Validate admin credentials against environment variables
-    const isValidCredentials = await validateAdminCredentials(username, password);
+    // Authenticate admin using AdminService
+    const authResult = await AdminService.authenticateAdmin(loginRequest);
     
-    if (!isValidCredentials) {
-      console.log(`❌ Invalid login credentials for: ${username}`);
+    if (!authResult.success) {
+      console.log(`❌ Authentication failed for: ${username}`);
       
       // Security: Use generic error message to prevent enumeration
       res.status(401).json({
         success: false,
-        error: 'Invalid credentials'
+        error: authResult.message || 'Invalid credentials'
       });
       return;
     }
     
-    // Generate admin ID (in production, this would come from database)
-    const adminId = 'admin-' + Buffer.from(username).toString('base64').slice(0, 8);
-    
-    // Generate JWT tokens
-    const accessToken = generateAccessToken({
-      adminId,
-      username,
-      isAdmin: true
-    });
-    
-    const refreshToken = generateRefreshToken({
-      adminId,
-      username,
-      isAdmin: true
-    });
-    
-    console.log(`✅ Successful admin login for: ${username}`);
+    console.log(`✅ Successful admin login for: ${username} (${authResult.admin?.role})`);
     
     // Return success response with tokens
     res.status(200).json({
       success: true,
       message: 'Login successful',
       data: {
-        accessToken,
-        refreshToken,
-        admin: {
-          id: adminId,
-          username,
-          isAdmin: true
-        },
+        accessToken: authResult.token,
+        admin: authResult.admin,
         expiresIn: process.env.JWT_EXPIRES_IN || '24h'
       }
     });

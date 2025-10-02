@@ -69,11 +69,18 @@ const connectDB = async (): Promise<void> => {
     // Update connection state
     isConnected = true;
     
-    // Success logging with connection details
+    // Success logging with connection details (consolidated)
     console.log('✅ MongoDB connected successfully');
-    console.log(`📊 Database: ${connection.connection.name}`);
-    console.log(`🌐 Host: ${connection.connection.host}:${connection.connection.port}`);
-    console.log(`📈 Ready State: ${connection.connection.readyState}`);
+    console.log(`📊 Database: ${connection.connection.name} | Host: ${connection.connection.host}:${connection.connection.port} | State: ${connection.connection.readyState}`);
+
+    // Initialize GridFS after successful connection
+    try {
+      const { initializeGridFSBucket } = await import('../server/utils/gridfs');
+      await initializeGridFSBucket();
+    } catch (gridfsError) {
+      console.error('⚠️  GridFS initialization failed:', gridfsError);
+      console.log('📁 File uploads will fall back to disk storage');
+    }
 
     // Connection event listeners for monitoring
     mongoose.connection.on('disconnected', () => {
@@ -94,6 +101,7 @@ const connectDB = async (): Promise<void> => {
     // Graceful shutdown handling
     process.on('SIGINT', async () => {
       try {
+        console.log('🔌 MongoDB disconnected, cleaning up GridFS...');
         await mongoose.connection.close();
         console.log('🔒 MongoDB connection closed through app termination');
         process.exit(0);

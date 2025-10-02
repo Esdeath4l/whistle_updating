@@ -7,8 +7,10 @@ import {
   UpdateReportRequest,
   ReportStatus,
   ReportCategory,
+  ReportSeverity,
   LocationData,
   ModerationResult,
+  EncryptedReportData,
 } from "../../shared/api";
 import ReportModel from "../../shared/models/report";
 import AlertModel from "../../shared/models/Alert";
@@ -16,12 +18,53 @@ import { notifyNewReport } from "./notifications";
 import { AuthService, AuthRequest } from "../utils/auth";
 import { DataEncryption } from "../utils/encryption";
 import { emailService } from "../email-service";
+import { smsService } from "../sms-service";
 import { uploadFields, getFileUrl, cleanupFiles } from "../utils/fileUpload";
 
 /**
  * Enhanced Reports Routes with JWT Authentication and Encryption
  * Handles report CRUD operations with secure data handling
  */
+
+// Helper function to convert database location to API location
+const convertLocationToAPI = (dbLocation: any): LocationData | undefined => {
+  if (!dbLocation) return undefined;
+  
+  return {
+    latitude: dbLocation.lat || dbLocation.latitude || 0,
+    longitude: dbLocation.lng || dbLocation.longitude || 0,
+    accuracy: dbLocation.accuracy || 0,
+    altitude: dbLocation.altitude,
+    altitudeAccuracy: dbLocation.altitudeAccuracy,
+    heading: dbLocation.heading,
+    speed: dbLocation.speed,
+    timestamp: dbLocation.timestamp || Date.now(),
+    address: dbLocation.address,
+    capturedAt: dbLocation.capturedAt,
+    source: dbLocation.source || 'browser_gps'
+  };
+};
+
+// Helper function to safely cast encrypted data
+const convertEncryptedData = (data: any): EncryptedReportData | undefined => {
+  if (!data || typeof data === 'string') return undefined;
+  return data as EncryptedReportData;
+};
+
+// Helper function to map database status to API status
+const mapDatabaseStatusToAPI = (status: string): ReportStatus => {
+  switch (status) {
+    case 'in-progress':
+      return 'reviewed';
+    case 'escalated':
+      return 'flagged';
+    case 'pending':
+    case 'resolved':
+      return status as ReportStatus;
+    default:
+      return 'pending';
+  }
+};
 
 // Simple AI moderation (server-side backup)
 function moderateContent(text: string): ModerationResult {
@@ -128,9 +171,8 @@ export const createReport: RequestHandler = async (req, res) => {
 
       const validCategories = [
         "harassment",
-        "medical_emergency",
-        "safety_emergency",
-        "safety_concern",
+        "emergency",
+        "safety",
         "feedback",
       ];
       if (!validCategories.includes(category)) {
@@ -189,8 +231,7 @@ export const createReport: RequestHandler = async (req, res) => {
     // Auto-flag urgent reports or AI-flagged content
     if (
       severity === "urgent" ||
-      category === "medical_emergency" ||
-      category === "safety_emergency" ||
+      category === "emergency" ||
       (moderation && moderation.isFlagged && moderation.confidence > 0.7)
     ) {
       newReport.status = "flagged";
@@ -227,24 +268,46 @@ export const createReport: RequestHandler = async (req, res) => {
       } catch (emailError) {
         console.error('Error sending alert email:', emailError);
       }
+
+      // Send SMS notification for the alert
+      try {
+        const smsSent = await smsService.sendAlertNotification(alert, savedReport);
+        if (smsSent) {
+          alert.sms_sent = true;
+          console.log(`📱 SMS alert sent for ${savedReport.severity} report`);
+          
+          // Also send to the specific number +91 9500068744
+          const specificSMS = await smsService.sendSMSToSpecificNumber(
+            `🚨 WHISTLE ALERT\n\nNew ${savedReport.severity} ${savedReport.category} report received.\nID: ${savedReport.shortId}\nTime: ${new Date().toLocaleString()}\n\nCheck admin dashboard immediately.`
+          );
+          
+          if (specificSMS) {
+            console.log(`📱 SMS also sent to +91 9500068744`);
+          }
+        } else {
+          console.log(`⚠️ Failed to send SMS for ${savedReport.severity} report`);
+        }
+      } catch (smsError) {
+        console.error('Error sending alert SMS:', smsError);
+      }
     }
 
     // Convert MongoDB document to API format for notifications
     const reportResponse: ReportType = {
       id: savedReport._id.toString(),
       message: savedReport.message,
-      category: savedReport.category,
-      severity: savedReport.severity,
+      category: savedReport.category as ReportCategory,
+      severity: savedReport.severity as ReportSeverity,
       photo_url: savedReport.photo_url,
       video_url: savedReport.video_url,
       video_metadata: savedReport.video_metadata,
-      created_at: savedReport.created_at.toISOString(),
-      status: savedReport.status,
+      created_at: savedReport.createdAt.toISOString(),
+      status: mapDatabaseStatusToAPI(savedReport.status),
       admin_response: savedReport.admin_response,
       admin_response_at: savedReport.admin_response_at?.toISOString(),
-      encrypted_data: savedReport.encrypted_data,
+      encrypted_data: convertEncryptedData(savedReport.encrypted_data),
       is_encrypted: savedReport.is_encrypted,
-      location: savedReport.location,
+      location: convertLocationToAPI(savedReport.location),
       moderation: savedReport.moderation,
       is_offline_sync: savedReport.is_offline_sync,
       shortId: savedReport.shortId
@@ -475,6 +538,18 @@ export const createReportWithFiles: RequestHandler = async (req, res) => {
             emailService.sendAlertNotification(alertDoc, savedReport).catch(err => {
               console.error("Failed to send email alert:", err);
             });
+
+            // Send SMS notification
+            smsService.sendAlertNotification(alertDoc, savedReport).catch(err => {
+              console.error("Failed to send SMS alert:", err);
+            });
+
+            // Send SMS to specific number +91 9500068744
+            smsService.sendSMSToSpecificNumber(
+              `🚨 ${isEmergency ? 'EMERGENCY' : 'URGENT'} REPORT\n\nType: ${category}\nID: ${savedReport.shortId}\nTime: ${new Date().toLocaleString()}\n\n⚡ Immediate action required!\nCheck admin dashboard now.`
+            ).catch(err => {
+              console.error("Failed to send SMS to specific number:", err);
+            });
           } catch (alertError) {
             console.error("Error creating alert:", alertError);
           }
@@ -484,18 +559,18 @@ export const createReportWithFiles: RequestHandler = async (req, res) => {
         const reportResponse: ReportType = {
           id: savedReport._id.toString(),
           message: savedReport.message,
-          category: savedReport.category,
-          severity: savedReport.severity,
+          category: savedReport.category as ReportCategory,
+          severity: savedReport.severity as ReportSeverity,
           photo_url: savedReport.photo_url,
           video_url: savedReport.video_url,
           video_metadata: savedReport.video_metadata,
           created_at: savedReport.created_at.toISOString(),
-          status: savedReport.status,
+          status: mapDatabaseStatusToAPI(savedReport.status),
           admin_response: savedReport.admin_response,
           admin_response_at: savedReport.admin_response_at?.toISOString(),
-          encrypted_data: savedReport.encrypted_data,
+          encrypted_data: savedReport.encrypted_data ? (savedReport.encrypted_data as unknown as EncryptedReportData) : undefined,
           is_encrypted: savedReport.is_encrypted,
-          location: savedReport.location,
+          location: convertLocationToAPI(savedReport.location),
           moderation: savedReport.moderation,
           is_offline_sync: savedReport.is_offline_sync,
           shortId: savedReport.shortId
@@ -719,21 +794,21 @@ export const updateReport: RequestHandler = async (req: AuthRequest, res) => {
     const reportResponse: ReportType = {
       id: responseReport._id.toString(),
       message: responseReport.message,
-      category: responseReport.category,
-      severity: responseReport.severity,
-      photo_url: responseReport.photo_url,
-      video_url: responseReport.video_url,
-      video_metadata: responseReport.video_metadata,
+      category: responseReport.category as ReportCategory,
+      severity: responseReport.severity as ReportSeverity,
+      photo_url: (responseReport as any).photo_url,
+      video_url: (responseReport as any).video_url,
+      video_metadata: (responseReport as any).video_metadata,
       created_at: responseReport.created_at.toISOString(),
-      status: responseReport.status,
+      status: mapDatabaseStatusToAPI(responseReport.status),
       admin_response: responseReport.admin_response,
       admin_response_at: responseReport.admin_response_at?.toISOString(),
-      encrypted_data: responseReport.encrypted_data,
+      encrypted_data: (responseReport as any).encrypted_data ? ((responseReport as any).encrypted_data as unknown as EncryptedReportData) : undefined,
       is_encrypted: responseReport.is_encrypted,
-      location: responseReport.location,
-      moderation: responseReport.moderation,
-      is_offline_sync: responseReport.is_offline_sync,
-      shortId: responseReport.shortId
+      location: convertLocationToAPI((responseReport as any).location),
+      moderation: (responseReport as any).moderation,
+      is_offline_sync: (responseReport as any).is_offline_sync,
+      shortId: (responseReport as any).shortId
     };
 
     res.json({

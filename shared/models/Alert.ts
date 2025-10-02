@@ -1,4 +1,5 @@
 import mongoose, { Document, Schema, Model } from "mongoose";
+import { nanoid } from "nanoid";
 
 export interface IAlert extends Document {
   reportId: mongoose.Types.ObjectId;
@@ -18,6 +19,7 @@ export interface IAlert extends Document {
   is_acknowledged: boolean;
   notification_sent: boolean;
   email_sent: boolean;
+  sms_sent?: boolean;
 }
 
 const alertSchema: Schema<IAlert> = new Schema({
@@ -30,7 +32,9 @@ const alertSchema: Schema<IAlert> = new Schema({
   shortId: {
     type: String,
     required: true,
-    index: true
+    unique: true,
+    index: true,
+    default: () => nanoid(8).toUpperCase()
   },
   alertType: {
     type: String,
@@ -75,6 +79,10 @@ const alertSchema: Schema<IAlert> = new Schema({
     default: false
   },
   email_sent: {
+    type: Boolean,
+    default: false
+  },
+  sms_sent: {
     type: Boolean,
     default: false
   }

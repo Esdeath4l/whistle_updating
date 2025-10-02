@@ -2,12 +2,17 @@ import express from "express";
 import cors from "cors";
 import path from "path";
 import { fileURLToPath } from 'url';
+import { createServer as createHTTPServer, Server as HTTPServer } from 'http';
+import { initializeSocketIO } from "./utils/realtime";
+import { sendUrgentReportNotifications } from "./utils/notifications";
+import { DataEncryption } from "./utils/encryption";
 import { handleDemo } from "./routes/demo";
 import { handleUploadError } from "./utils/fileUpload";
 import {
   createReport,
   getReports,
   getReportById,
+  getReportByShortId,
 } from "./routes/reports-mongodb";
 import { 
   createReportWithGridFS, 
@@ -15,10 +20,25 @@ import {
 } from "./routes/gridfs-reports";
 import { adminLogin } from "./routes/adminLogin";
 import {
+  getAdminReports,
+  updateReportStatus,
+  getAdminReportDetails
+} from "./routes/admin-reports";
+import {
+  markReportAsViewed,
+  markReportAsResolved,
+  getEscalationStats
+} from "./routes/admin-tracking";
+import {
   streamNotifications,
   testEmailNotification,
+  sendSMSNotification,
 } from "./utils/notificationHelpers";
 import { requireAuth, requireAdmin } from "./middleware/authMiddleware";
+import { testNotifications } from "./routes/test-notifications";
+import { AdminService } from "./utils/admin-service";
+import { EscalationService } from "./utils/escalation-service";
+import AdminModel, { AdminRole } from "../shared/models/Admin";
 
 /**
  * Enhanced Whistle Server with JWT Authentication and Security
@@ -103,6 +123,38 @@ export function createServer() {
     res.json({ success: true, message: "Test submission successful" });
   });
 
+  // Test SMS route
+  app.post("/test-sms", async (req, res) => {
+    try {
+      console.log("📱 Testing SMS functionality...");
+      
+      // Create test notification
+      const testNotification = {
+        reportId: "test-id",
+        shortId: "TEST123",
+        priority: "urgent" as const,
+        category: "test",
+        message: "This is a test SMS from Whistle app",
+        timestamp: new Date()
+      };
+      
+      const success = await sendSMSNotification(testNotification);
+      
+      res.json({ 
+        success, 
+        message: success ? "SMS test sent successfully" : "SMS test failed",
+        provider: process.env.SMS_PROVIDER || "unknown",
+        adminPhone: process.env.ADMIN_PHONE_NUMBER || process.env.ADMIN_PHONE || "not configured"
+      });
+    } catch (error) {
+      console.error("SMS test error:", error);
+      res.status(500).json({ 
+        success: false, 
+        error: error.message 
+      });
+    }
+  });
+
   // Temporary admin setup endpoint (remove in production)
   app.post("/setup-admin", async (req, res) => {
     try {
@@ -125,7 +177,7 @@ export function createServer() {
         username: 'admin',
         password: hashedPassword,
         email: 'admin@whistle.com',
-        role: AdminRole.SUPERADMIN,
+        role: AdminRole.PRIMARY,
         firstName: 'System',
         lastName: 'Administrator',
         isActive: true
@@ -150,7 +202,10 @@ export function createServer() {
 
   // Public report routes (API prefix handled by Vite middleware)
   app.post("/reports", createReport); // Unified report creation - /api/reports
+  app.post("/reports/with-files", createReportWithGridFS); // Report creation with GridFS file uploads - /api/reports/with-files
   app.get("/reports/:id", getReportById); // Get single report by ID - /api/reports/:id
+  app.get("/reports/:id/status", getReportByShortId); // Get report by ID (shortId or ObjectId) for status check - /api/reports/:id/status
+  app.get("/reports/status/:shortId", getReportByShortId); // Alternative route for backward compatibility
   
   // GridFS file serving routes  
   app.get("/files/:fileId", getGridFSFile); // Serve GridFS files - /api/files/:fileId
@@ -160,8 +215,19 @@ export function createServer() {
   // Public admin authentication routes
   app.post("/admin/login", adminLogin);
 
+  // Test notifications route (admin only)
+  app.get("/test/notifications", requireAuth, requireAdmin, testNotifications);
+
   // Protected admin routes (JWT required) - apply new middleware
-  app.get("/reports", requireAuth, requireAdmin, getReports); // Get all reports (admin only)
+  app.get("/reports", requireAuth, requireAdmin, getAdminReports); // Get all reports (admin only)
+  app.get("/admin/reports", requireAuth, requireAdmin, getAdminReports); // Alternative admin route
+  app.get("/admin/reports/:id", requireAuth, requireAdmin, getAdminReportDetails); // Get detailed report
+  app.put("/admin/reports/:id", requireAuth, requireAdmin, updateReportStatus); // Update report status
+  
+  // Multi-admin tracking routes
+  app.post("/reports/:id/viewed", requireAuth, requireAdmin, markReportAsViewed); // Mark report as viewed
+  app.post("/reports/:id/resolve", requireAuth, requireAdmin, markReportAsResolved); // Mark report as resolved
+  app.get("/admin/escalation-stats", requireAuth, requireAdmin, getEscalationStats); // Get escalation statistics
 
   // Protected notification routes (JWT required)
   app.get("/notifications/stream", requireAuth, requireAdmin, streamNotifications); // Real-time notifications
@@ -217,5 +283,10 @@ export function createServer() {
     });
   });
 
-  return app;
+  return {
+    app,
+    initializeSocketIO: (httpServer: HTTPServer) => {
+      return initializeSocketIO(httpServer);
+    }
+  };
 }

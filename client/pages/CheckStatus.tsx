@@ -47,17 +47,39 @@ export default function CheckStatus() {
     setReportStatus(null);
 
     try {
+      console.log(`🔍 Checking status for report ID: ${reportId.trim()}`);
       const response = await fetch(`/api/reports/${reportId.trim()}/status`);
 
       if (response.ok) {
-        const data: ReportStatusResponse = await response.json();
-        setReportStatus(data);
+        const result = await response.json();
+        console.log("📊 Status response:", result);
+        
+        if (result.success && result.data) {
+          // Convert backend response to frontend format
+          const statusData: ReportStatusResponse = {
+            id: result.data.shortId || result.data.id,
+            status: result.data.status,
+            created_at: result.data.created_at,
+            admin_response: result.data.admin_response,
+            admin_response_at: result.data.admin_response_at,
+            // Additional fields for better display
+            message: result.data.message,
+            category: result.data.category,
+            severity: result.data.severity,
+            location: result.data.location,
+            is_encrypted: result.data.is_encrypted
+          };
+          setReportStatus(statusData);
+        } else {
+          setError("Invalid response format from server.");
+        }
       } else if (response.status === 404) {
         setError(
           "Report not found. Please check your report ID and try again.",
         );
       } else {
-        setError("Failed to fetch report status. Please try again.");
+        const errorData = await response.json().catch(() => ({}));
+        setError(errorData.error || "Failed to fetch report status. Please try again.");
       }
     } catch (err) {
       console.error("Error checking status:", err);
@@ -163,8 +185,8 @@ export default function CheckStatus() {
             <CardHeader>
               <CardTitle>Report ID Lookup</CardTitle>
               <CardDescription>
-                Enter the unique report ID you received when submitting your
-                complaint.
+                Enter the unique report ID you received when submitting your report.
+                (like "ABCD1234") .
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -174,7 +196,7 @@ export default function CheckStatus() {
                   <Input
                     id="reportId"
                     type="text"
-                    placeholder="e.g., report_123"
+                    placeholder="e.g., ABCD1234 or 60d5ec49f1b5c72b8c8e4b2a"
                     value={reportId}
                     onChange={(e) => setReportId(e.target.value)}
                     className="font-mono"
@@ -225,6 +247,49 @@ export default function CheckStatus() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
+                {/* Report Details */}
+                {reportStatus.message && (
+                  <div>
+                    <Label className="text-sm font-medium mb-2 block">
+                      Report Content
+                    </Label>
+                    <div className="bg-muted p-3 rounded-lg">
+                      <p className="text-sm">
+                        {reportStatus.is_encrypted ? (
+                          <span className="flex items-center gap-2">
+                            <Shield className="w-4 h-4" />
+                            Encrypted Report Content
+                          </span>
+                        ) : (
+                          reportStatus.message
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Category and Severity */}
+                <div className="grid grid-cols-2 gap-4">
+                  {reportStatus.category && (
+                    <div>
+                      <Label className="text-sm font-medium mb-2 block">
+                        Category
+                      </Label>
+                      <Badge variant="outline">{reportStatus.category}</Badge>
+                    </div>
+                  )}
+                  {reportStatus.severity && (
+                    <div>
+                      <Label className="text-sm font-medium mb-2 block">
+                        Severity
+                      </Label>
+                      <Badge variant={reportStatus.severity === 'urgent' ? 'destructive' : 'secondary'}>
+                        {reportStatus.severity}
+                      </Badge>
+                    </div>
+                  )}
+                </div>
+
                 {/* Current Status */}
                 <div>
                   <Label className="text-sm font-medium mb-2 block">
@@ -250,6 +315,34 @@ export default function CheckStatus() {
                     {formatDate(reportStatus.created_at)}
                   </div>
                 </div>
+
+                {/* Location */}
+                {reportStatus.location && (
+                  <div>
+                    <Label className="text-sm font-medium mb-2 block">
+                      Location
+                    </Label>
+                    <div className="text-sm text-muted-foreground">
+                      {(() => {
+                        // Get coordinates from location structure
+                        const lat = reportStatus.location.latitude;
+                        const lng = reportStatus.location.longitude;
+                        
+                        // If we have an address, use it preferentially
+                        if (reportStatus.location.address && reportStatus.location.address.trim() !== '') {
+                          return reportStatus.location.address;
+                        }
+                        
+                        // Otherwise, format coordinates if available
+                        if (lat !== undefined && lng !== undefined && lat !== null && lng !== null) {
+                          return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+                        }
+                        
+                        return 'Location coordinates unavailable';
+                      })()}
+                    </div>
+                  </div>
+                )}
 
                 {/* Admin Response */}
                 {reportStatus.admin_response && (
@@ -289,12 +382,13 @@ export default function CheckStatus() {
               <h3 className="font-semibold mb-3">Need Help?</h3>
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>
-                  • Report IDs are case-sensitive and must be entered exactly as
-                  provided
+                  • Report IDs can be either short format (8 characters like "ABCD1234") or long format (24+ characters)
                 </p>
                 <p>
-                  • Status updates may take time as reports are reviewed
-                  manually
+                  • IDs are case-sensitive and must be entered exactly as provided
+                </p>
+                <p>
+                  • Status updates may take time as reports are reviewed manually
                 </p>
                 <p>
                   • If you've lost your report ID, you'll need to submit a new

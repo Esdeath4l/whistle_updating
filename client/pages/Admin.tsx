@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -28,6 +28,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
+import {
   MessageSquare,
   ArrowLeft,
   Lock,
@@ -47,6 +53,8 @@ import {
   Video,
   MapPin,
   Map,
+  Bell,
+  Wifi,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import {
@@ -58,7 +66,29 @@ import {
 import { decryptReportData } from "@/lib/encryption";
 import { notificationService } from "@/lib/notifications";
 import ReportsMap from "@/components/ReportsMap";
-import { formatLocation } from "@/lib/geolocation";
+// import ReportsMap from "@/components/ReportsMap"; // REMOVED: Interactive map display
+// import { formatLocation } from "@/lib/geolocation";
+
+// Enhanced function for formatLocation with better error handling
+const formatLocation = (location: any) => {
+  if (!location) return 'Location not available';
+  
+  // Try to get coordinates from different possible structures
+  const lat = location.latitude || location.lat;
+  const lng = location.longitude || location.lng;
+  
+  // If we have an address, use it preferentially
+  if (location.address && location.address.trim() !== '') {
+    return location.address;
+  }
+  
+  // Otherwise, format coordinates if available
+  if (lat !== undefined && lng !== undefined && lat !== null && lng !== null) {
+    return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+  }
+  
+  return 'Location coordinates unavailable';
+};
 
 export default function Admin() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -70,14 +100,243 @@ export default function Admin() {
   const [selectedReport, setSelectedReport] = useState<Report | null>(null);
   const [adminResponse, setAdminResponse] = useState("");
   const [statusFilter, setStatusFilter] = useState<ReportStatus | "all">("all");
+  const [authToken, setAuthToken] = useState<string>(""); // Store JWT token dynamically
+  
+  // Real-time notification states
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
 
-  const authToken = "ritika:satoru 2624"; // In production, this would be stored securely
+  // Check for stored auth token on component mount
+  useEffect(() => {
+    const storedToken = sessionStorage.getItem('adminToken');
+    if (storedToken) {
+      setAuthToken(storedToken);
+      setIsAuthenticated(true);
+    }
+  }, []);
+
+  // =======================================
+  // REAL-TIME NOTIFICATIONS (WITH FALLBACK)
+  // =======================================
+  
+  /**
+   * Initialize real-time notifications
+   * Uses Socket.io if available, falls back to polling
+   */
+  useEffect(() => {
+    if (isAuthenticated && authToken) {
+      let pollInterval: NodeJS.Timeout;
+      
+      const initializeRealTime = async () => {
+        try {
+          // Try to use Socket.io if available
+          try {
+            const socketModule = await import('socket.io-client');
+            const { io } = socketModule;
+            
+            const socket = io(window.location.origin, {
+              transports: ['websocket', 'polling'],
+              autoConnect: true
+            });
+
+            socket.on('connect', () => {
+              console.log('🔗 Connected to real-time notifications via Socket.io');
+              setIsConnected(true);
+              socket.emit('authenticate', authToken);
+            });
+
+            socket.on('disconnect', () => {
+              console.log('🔌 Disconnected from real-time notifications');
+              setIsConnected(false);
+            });
+
+            socket.on('notification', (notification) => {
+              console.log('📨 Received notification:', notification);
+              
+              setNotifications(prev => [notification, ...prev.slice(0, 9)]);
+              setUnreadCount(prev => prev + 1);
+              
+              if (notification.type === 'NEW_REPORT') {
+                fetchReports();
+              }
+              
+              if ('Notification' in window && Notification.permission === 'granted') {
+                new Notification(`Whistle Admin: ${notification.data.message}`, {
+                  icon: '/favicon.ico',
+                  tag: notification.data.shortId
+                });
+              }
+            });
+
+            return () => socket.disconnect();
+            
+          } catch (socketError) {
+            console.log('⚠️ Socket.io not available, using polling fallback');
+            
+            // Fallback: Poll for new reports every 30 seconds
+            setIsConnected(true); // Indicate we have some form of real-time updates
+            
+            pollInterval = setInterval(async () => {
+              try {
+                const response = await fetch('/api/admin/reports?limit=1', {
+                  headers: { Authorization: `Bearer ${authToken}` }
+                });
+                
+                if (response.ok) {
+                  const data = await response.json();
+                  const latestReport = data.reports?.[0];
+                  
+                  if (latestReport && reports.length > 0) {
+                    const isNewReport = !reports.find(r => r.id === latestReport.id);
+                    if (isNewReport) {
+                      setNotifications(prev => [{
+                        type: 'NEW_REPORT',
+                        data: {
+                          shortId: latestReport.shortId,
+                          priority: latestReport.severity || 'medium',
+                          message: `New ${latestReport.severity} priority report received: ${latestReport.shortId}`
+                        },
+                        timestamp: new Date().toISOString()
+                      }, ...prev.slice(0, 9)]);
+                      
+                      setUnreadCount(prev => prev + 1);
+                      fetchReports();
+                    }
+                  }
+                }
+              } catch (error) {
+                console.error('Polling error:', error);
+              }
+            }, 30000); // Poll every 30 seconds
+          }
+          
+        } catch (error) {
+          console.log('⚠️ Real-time notifications unavailable:', error);
+        }
+      };
+      
+      initializeRealTime();
+      
+      return () => {
+        if (pollInterval) clearInterval(pollInterval);
+      };
+    }
+  }, [isAuthenticated, authToken, reports]);
+
+  // Request notification permission
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  // Function to mark report as viewed by current admin
+  const markReportAsViewed = async (reportId: string) => {
+    try {
+      const token = localStorage.getItem("adminToken");
+      if (!token) return;
+
+      await fetch(`/api/reports/${reportId}/viewed`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
+      });
+      
+      console.log(`📋 Report ${reportId} marked as viewed`);
+    } catch (error) {
+      console.error("Error marking report as viewed:", error);
+    }
+  };
+
+  // Function to mark report as resolved by current admin
+  const markReportAsResolved = async (reportId: string) => {
+    try {
+      const token = localStorage.getItem("adminToken");
+      if (!token) return;
+
+      const response = await fetch(`/api/reports/${reportId}/resolve`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
+      });
+
+      if (response.ok) {
+        console.log(`✅ Report ${reportId} marked as resolved`);
+        // Refresh reports to show updated status
+        fetchReports();
+      }
+    } catch (error) {
+      console.error("Error marking report as resolved:", error);
+    }
+  };
+
+  const fetchReports = useCallback(async () => {
+    if (!authToken) {
+      console.log("⚠️ No auth token available for fetching reports");
+      return;
+    }
+    
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (statusFilter !== "all") {
+        params.append("status", statusFilter);
+      }
+
+      console.log("📊 Fetching admin reports...");
+      // Use the admin-specific endpoint for better data retrieval
+      const response = await fetch(`/api/admin/reports?${params}`, {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          'Content-Type': 'application/json'
+        },
+      });
+
+      if (response.ok) {
+        const data: GetReportsResponse = await response.json();
+        setReports(data.reports);
+        console.log(`✅ Fetched ${data.reports.length} reports for admin dashboard`);
+      } else if (response.status === 401) {
+        console.log("❌ Authentication failed, logging out");
+        setIsAuthenticated(false);
+        setAuthToken("");
+        sessionStorage.removeItem('adminToken');
+      } else {
+        console.error("❌ Failed to fetch reports:", response.status);
+      }
+    } catch (error) {
+      console.error("❌ Error fetching reports:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, [authToken, statusFilter]);
+
+  // Fetch reports when auth token changes
+  useEffect(() => {
+    if (authToken && isAuthenticated) {
+      fetchReports();
+    }
+  }, [authToken, isAuthenticated, fetchReports]);
+
+  const handleLogout = () => {
+    setIsAuthenticated(false);
+    setAuthToken("");
+    setReports([]);
+    sessionStorage.removeItem('adminToken');
+    console.log("👋 Admin logged out");
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError("");
 
     try {
+      console.log("🔐 Attempting admin login...");
       const response = await fetch("/api/admin/login", {
         method: "POST",
         headers: {
@@ -97,14 +356,22 @@ export default function Admin() {
       }
 
       const data = await response.json();
+      console.log("📊 Login response:", data);
 
-      if (data.success) {
+      if (data.success && data.data?.accessToken) {
+        const token = data.data.accessToken;
+        setAuthToken(token);
         setIsAuthenticated(true);
+        
+        // Store token in sessionStorage for persistence
+        sessionStorage.setItem('adminToken', token);
+        console.log("✅ Admin authenticated successfully");
+        
         fetchReports();
 
         // Setup real-time notifications with error handling
         try {
-          notificationService.setupRealtimeNotifications(authToken);
+          notificationService.setupRealtimeNotifications(token);
 
           // Request notification permission
           if (
@@ -126,31 +393,6 @@ export default function Admin() {
     }
   };
 
-  const fetchReports = async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (statusFilter !== "all") {
-        params.append("status", statusFilter);
-      }
-
-      const response = await fetch(`/api/reports?${params}`, {
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-        },
-      });
-
-      if (response.ok) {
-        const data: GetReportsResponse = await response.json();
-        setReports(data.reports);
-      }
-    } catch (error) {
-      console.error("Error fetching reports:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const updateReportStatus = async (
     reportId: string,
     status: ReportStatus,
@@ -159,10 +401,11 @@ export default function Admin() {
     try {
       const updateData: UpdateReportRequest = { status };
       if (response) {
-        updateData.admin_response = response;
+        updateData.admin_response = response; // Use admin_response as defined in the interface
       }
 
-      const res = await fetch(`/api/reports/${reportId}`, {
+      // Use the admin-specific update endpoint
+      const res = await fetch(`/api/admin/reports/${reportId}`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -172,9 +415,13 @@ export default function Admin() {
       });
 
       if (res.ok) {
+        const result = await res.json();
+        console.log("✅ Report status updated:", result);
         fetchReports();
         setSelectedReport(null);
         setAdminResponse("");
+      } else {
+        console.error("Failed to update report:", res.status);
       }
     } catch (error) {
       console.error("Error updating report:", error);
@@ -398,6 +645,35 @@ export default function Admin() {
             </div>
           </Link>
           <div className="flex items-center gap-4">
+            {/* Real-time Notification Panel */}
+            <div className="relative">
+              <Button 
+                variant="ghost" 
+                size="sm"
+                onClick={() => setUnreadCount(0)}
+                className="relative"
+              >
+                <Bell className="w-4 h-4 mr-2" />
+                Notifications
+                {unreadCount > 0 && (
+                  <Badge 
+                    variant="destructive" 
+                    className="absolute -top-1 -right-1 h-5 w-5 rounded-full p-0 flex items-center justify-center text-xs"
+                  >
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </Badge>
+                )}
+              </Button>
+              
+              {/* Real-time Status Indicator */}
+              <div className="flex items-center gap-1 mt-1">
+                <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-gray-400'}`} />
+                <span className="text-xs text-muted-foreground">
+                  {isConnected ? 'Live' : 'Offline'}
+                </span>
+              </div>
+            </div>
+            
             <Link to="/admin/settings">
               <Button variant="ghost" size="sm">
                 <Settings className="w-4 h-4 mr-2" />
@@ -409,7 +685,7 @@ export default function Admin() {
               size="sm"
               onClick={() => {
                 setIsAuthenticated(false);
-                notificationService.disconnect();
+                handleLogout();
               }}
             >
               Sign Out
@@ -564,51 +840,92 @@ export default function Admin() {
               >
                 Add Demo Data
               </Button>
+              
+              {/* Test Notifications Button */}
+              <Button
+                onClick={async () => {
+                  try {
+                    console.log("🧪 Testing notification systems...");
+                    
+                    const response = await fetch("/api/test/notifications", {
+                      method: "GET",
+                      headers: {
+                        "Authorization": `Bearer ${localStorage.getItem("adminToken")}`,
+                        "Content-Type": "application/json"
+                      }
+                    });
+
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                      console.log("🧪 Notification test results:", result.results);
+                      
+                      // Show detailed results
+                      let message = "Notification Test Results:\n\n";
+                      
+                      if (result.results.realTime.status === 'success') {
+                        message += "✅ Real-time notifications: Working\n";
+                      } else {
+                        message += `❌ Real-time notifications: Failed (${result.results.realTime.error || 'Unknown error'})\n`;
+                      }
+                      
+                      if (result.results.sms.status === 'success') {
+                        message += "✅ SMS notifications: Working\n";
+                      } else if (result.results.sms.status === 'not_configured') {
+                        message += "⚠️ SMS notifications: Not configured\n";
+                      } else {
+                        message += `❌ SMS notifications: Failed (${result.results.sms.error || 'Unknown error'})\n`;
+                      }
+                      
+                      if (result.results.email.status === 'success') {
+                        message += "✅ Email notifications: Working\n";
+                      } else {
+                        message += `❌ Email notifications: Failed (${result.results.email.error || 'Unknown error'})\n`;
+                      }
+                      
+                      // Add recommendations
+                      if (result.recommendations) {
+                        message += "\nRecommendations:\n";
+                        Object.entries(result.recommendations).forEach(([key, rec]) => {
+                          if (rec) message += `• ${key}: ${rec}\n`;
+                        });
+                      }
+                      
+                      alert(message);
+                    } else {
+                      console.error("Notification test failed:", result);
+                      alert("Notification test failed. Check console for details.");
+                    }
+                  } catch (error) {
+                    console.error("Error testing notifications:", error);
+                    alert("Error testing notifications. Check console for details.");
+                  }
+                }}
+                variant="outline"
+                size="sm"
+                className="gap-2"
+              >
+                <Bell className="w-4 h-4" />
+                Test Notifications
+              </Button>
             </div>
           </div>
 
-          {/* Reports Map */}
-          {reports.length > 0 && (
-            <Card className="mb-8">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Map className="w-5 h-5" />
-                  Reports Location Map
-                </CardTitle>
-                <CardDescription>
-                  Interactive map showing report locations with clustering.
-                  Flagged reports are highlighted with special markers.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <ReportsMap
-                  reports={reports}
-                  onReportSelect={setSelectedReport}
-                  className="h-96 w-full rounded-lg border"
-                />
-                <div className="mt-4 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                  <div className="flex items-center gap-1">
-                    <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
-                    Normal reports
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <div className="w-3 h-3 bg-red-500 rounded-full"></div>
-                    Flagged reports
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <div className="w-3 h-3 bg-orange-500 rounded-full"></div>
-                    AI flagged
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <div className="w-3 h-3 bg-red-600 rounded-full"></div>
-                    Urgent reports
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
+          {/* Reports Dashboard with Tabs */}
+          <Tabs defaultValue="list" className="w-full">
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="list" className="flex items-center gap-2">
+                <MessageSquare className="w-4 h-4" />
+                Reports List
+              </TabsTrigger>
+              <TabsTrigger value="map" className="flex items-center gap-2">
+                <Map className="w-4 h-4" />
+                Geographic Map
+              </TabsTrigger>
+            </TabsList>
 
-          {/* Reports List */}
+            <TabsContent value="list">
+              {/* Reports List */}
           {loading ? (
             <div className="text-center py-12">
               <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin mx-auto mb-4" />
@@ -725,7 +1042,10 @@ export default function Admin() {
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={() => setSelectedReport(report)}
+                            onClick={() => {
+                              setSelectedReport(report);
+                              markReportAsViewed(report.id);
+                            }}
                           >
                             <Eye className="w-4 h-4 mr-2" />
                             View Details
@@ -779,7 +1099,10 @@ export default function Admin() {
                                 </div>
                               </div>
 
-                              {(selectedReport.imageFileIds && selectedReport.imageFileIds.length > 0) && (
+                              {/* Photo Evidence */}
+                              {((selectedReport.imageFileIds && selectedReport.imageFileIds.length > 0) || 
+                                (selectedReport.photo_file_id) || 
+                                (selectedReport.files?.photo)) && (
                                 <div>
                                   <Label className="text-sm font-medium">
                                     Photo Evidence
@@ -790,79 +1113,161 @@ export default function Admin() {
                                       </Badge>
                                     )}
                                   </Label>
-                                  <div className="mt-2">
-                                    {selectedReport.imageFileIds.map((fileId, index) => (
-                                      <img
-                                        key={fileId}
-                                        src={`/api/files/images/${fileId}`}
-                                        alt={`Report evidence ${index + 1}`}
-                                        className="max-w-full h-auto rounded-lg border mb-2"
-                                        onError={(e) => {
-                                          console.error(
-                                            "Failed to load photo:",
-                                            e,
-                                          );
-                                          (
-                                            e.target as HTMLImageElement
-                                          ).style.display = "none";
-                                        }}
-                                      />
+                                  <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    {/* Handle multiple image file IDs */}
+                                    {selectedReport.imageFileIds?.map((fileId, index) => (
+                                      <div key={fileId} className="relative">
+                                        <img
+                                          src={`/api/reports/file/${fileId}`}
+                                          alt={`Report evidence ${index + 1}`}
+                                          className="w-full h-auto rounded-lg border cursor-pointer hover:opacity-80 transition-opacity"
+                                          onError={(e) => {
+                                            console.error("Failed to load photo:", e);
+                                            (e.target as HTMLImageElement).src = "/placeholder.svg";
+                                          }}
+                                          onClick={() => window.open(`/api/reports/file/${fileId}`, '_blank')}
+                                        />
+                                        <p className="text-xs text-muted-foreground mt-1">
+                                          Photo {index + 1} - Click to view full size
+                                        </p>
+                                      </div>
                                     ))}
+                                    
+                                    {/* Handle single photo file ID */}
+                                    {selectedReport.photo_file_id && !selectedReport.imageFileIds && (
+                                      <div className="relative">
+                                        <img
+                                          src={`/api/reports/file/${selectedReport.photo_file_id}`}
+                                          alt="Report evidence"
+                                          className="w-full h-auto rounded-lg border cursor-pointer hover:opacity-80 transition-opacity"
+                                          onError={(e) => {
+                                            console.error("Failed to load photo:", e);
+                                            (e.target as HTMLImageElement).src = "/placeholder.svg";
+                                          }}
+                                          onClick={() => window.open(`/api/reports/file/${selectedReport.photo_file_id}`, '_blank')}
+                                        />
+                                        <p className="text-xs text-muted-foreground mt-1">
+                                          Click to view full size
+                                        </p>
+                                      </div>
+                                    )}
+
+                                    {/* Handle files.photo structure */}
+                                    {selectedReport.files?.photo && !selectedReport.photo_file_id && !selectedReport.imageFileIds && (
+                                      <div className="relative">
+                                        <img
+                                          src={`/api/reports/file/${selectedReport.files.photo.id}`}
+                                          alt={selectedReport.files.photo.filename || "Report evidence"}
+                                          className="w-full h-auto rounded-lg border cursor-pointer hover:opacity-80 transition-opacity"
+                                          onError={(e) => {
+                                            console.error("Failed to load photo:", e);
+                                            (e.target as HTMLImageElement).src = "/placeholder.svg";
+                                          }}
+                                          onClick={() => window.open(`/api/reports/file/${selectedReport.files.photo.id}`, '_blank')}
+                                        />
+                                        <p className="text-xs text-muted-foreground mt-1">
+                                          {selectedReport.files.photo.filename} - Click to view full size
+                                        </p>
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                               )}
 
-                              {(selectedReport.videoFileIds && selectedReport.videoFileIds.length > 0) && (
+                              {/* Video Evidence */}
+                              {((selectedReport.videoFileIds && selectedReport.videoFileIds.length > 0) || 
+                                (selectedReport.video_file_id) || 
+                                (selectedReport.files?.video)) && (
                                 <div>
                                   <Label className="text-sm font-medium">
                                     Video Evidence
                                     {selectedReport.video_metadata && (
                                       <Badge variant="outline" className="ml-2">
-                                        {(
-                                          selectedReport.video_metadata.size /
-                                          1024 /
-                                          1024
-                                        ).toFixed(1)}
-                                        MB •{" "}
-                                        {Math.floor(
-                                          (selectedReport.video_metadata
-                                            .duration || 0) / 60,
-                                        )}
-                                        :
-                                        {String(
-                                          Math.floor(
-                                            (selectedReport.video_metadata
-                                              .duration || 0) % 60,
-                                          ),
-                                        ).padStart(2, "0")}
-                                        {selectedReport.video_metadata
-                                          .isRecorded && " • Recorded"}
+                                        {(selectedReport.video_metadata.size / 1024 / 1024).toFixed(1)}MB •{" "}
+                                        {Math.floor((selectedReport.video_metadata.duration || 0) / 60)}:
+                                        {String(Math.floor((selectedReport.video_metadata.duration || 0) % 60)).padStart(2, "0")}
+                                        {selectedReport.video_metadata.isRecorded && " • Recorded"}
                                       </Badge>
                                     )}
                                   </Label>
-                                  <div className="mt-2">
-                                    {selectedReport.videoFileIds.map((fileId, index) => (
-                                      <video
-                                        key={fileId}
-                                        src={`/api/files/videos/${fileId}`}
-                                        controls
-                                        preload="metadata"
-                                        className="max-w-full h-auto rounded-lg border bg-black mb-2"
-                                        style={{ maxHeight: "300px" }}
-                                        onError={(e) => {
-                                          console.error(
-                                            "Failed to load video:",
-                                            e,
-                                          );
-                                          (
-                                            e.target as HTMLVideoElement
-                                          ).style.display = "none";
-                                        }}
-                                      >
-                                        Your browser does not support video
-                                        playback.
-                                      </video>
+                                  <div className="mt-2 space-y-4">
+                                    {/* Handle multiple video file IDs */}
+                                    {selectedReport.videoFileIds?.map((fileId, index) => (
+                                      <div key={fileId} className="relative">
+                                        <video
+                                          src={`/api/reports/file/${fileId}`}
+                                          controls
+                                          preload="metadata"
+                                          className="w-full h-auto rounded-lg border bg-black"
+                                          style={{ maxHeight: "400px" }}
+                                          onError={(e) => {
+                                            console.error("Failed to load video:", e);
+                                            const videoElement = e.target as HTMLVideoElement;
+                                            videoElement.style.display = "none";
+                                            const errorDiv = document.createElement("div");
+                                            errorDiv.className = "flex items-center justify-center h-32 bg-muted rounded-lg border";
+                                            errorDiv.innerHTML = `<p class="text-sm text-muted-foreground">Failed to load video ${index + 1}</p>`;
+                                            videoElement.parentNode?.insertBefore(errorDiv, videoElement);
+                                          }}
+                                        >
+                                          Your browser does not support video playback.
+                                        </video>
+                                        <p className="text-xs text-muted-foreground mt-1">
+                                          Video {index + 1}
+                                        </p>
+                                      </div>
                                     ))}
+                                    
+                                    {/* Handle single video file ID */}
+                                    {selectedReport.video_file_id && !selectedReport.videoFileIds && (
+                                      <div className="relative">
+                                        <video
+                                          src={`/api/reports/file/${selectedReport.video_file_id}`}
+                                          controls
+                                          preload="metadata"
+                                          className="w-full h-auto rounded-lg border bg-black"
+                                          style={{ maxHeight: "400px" }}
+                                          onError={(e) => {
+                                            console.error("Failed to load video:", e);
+                                            const videoElement = e.target as HTMLVideoElement;
+                                            videoElement.style.display = "none";
+                                            const errorDiv = document.createElement("div");
+                                            errorDiv.className = "flex items-center justify-center h-32 bg-muted rounded-lg border";
+                                            errorDiv.innerHTML = `<p class="text-sm text-muted-foreground">Failed to load video</p>`;
+                                            videoElement.parentNode?.insertBefore(errorDiv, videoElement);
+                                          }}
+                                        >
+                                          Your browser does not support video playback.
+                                        </video>
+                                      </div>
+                                    )}
+
+                                    {/* Handle files.video structure */}
+                                    {selectedReport.files?.video && !selectedReport.video_file_id && !selectedReport.videoFileIds && (
+                                      <div className="relative">
+                                        <video
+                                          src={`/api/reports/file/${selectedReport.files.video.id}`}
+                                          controls
+                                          preload="metadata"
+                                          className="w-full h-auto rounded-lg border bg-black"
+                                          style={{ maxHeight: "400px" }}
+                                          onError={(e) => {
+                                            console.error("Failed to load video:", e);
+                                            const videoElement = e.target as HTMLVideoElement;
+                                            videoElement.style.display = "none";
+                                            const errorDiv = document.createElement("div");
+                                            errorDiv.className = "flex items-center justify-center h-32 bg-muted rounded-lg border";
+                                            errorDiv.innerHTML = `<p class="text-sm text-muted-foreground">Failed to load video</p>`;
+                                            videoElement.parentNode?.insertBefore(errorDiv, videoElement);
+                                          }}
+                                        >
+                                          Your browser does not support video playback.
+                                        </video>
+                                        <p className="text-xs text-muted-foreground mt-1">
+                                          {selectedReport.files.video.filename}
+                                        </p>
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                               )}
@@ -1045,6 +1450,18 @@ export default function Admin() {
                                 </Button>
                                 <Button
                                   size="sm"
+                                  variant="default"
+                                  className="bg-green-600 hover:bg-green-700"
+                                  onClick={() => {
+                                    markReportAsResolved(selectedReport.id);
+                                    setSelectedReport(null); // Close modal after resolving
+                                  }}
+                                >
+                                  <CheckCircle className="w-4 h-4 mr-2" />
+                                  Mark as Resolved
+                                </Button>
+                                <Button
+                                  size="sm"
                                   variant="outline"
                                   onClick={() =>
                                     updateReportStatus(
@@ -1067,6 +1484,27 @@ export default function Admin() {
               ))}
             </div>
           )}
+            </TabsContent>
+
+            <TabsContent value="map">
+              <div className="space-y-4">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Map className="w-5 h-5" />
+                      Geographic Distribution of Reports
+                    </CardTitle>
+                    <CardDescription>
+                      Interactive map showing all reports with location data. Click on pins to view report details.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <ReportsMap reports={reports} authToken={authToken} />
+                  </CardContent>
+                </Card>
+              </div>
+            </TabsContent>
+          </Tabs>
         </div>
       </div>
     </div>
