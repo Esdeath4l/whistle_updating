@@ -219,19 +219,35 @@ export const updateReportStatus: RequestHandler = async (req: AuthRequest, res) 
     
     console.log(`🔄 Admin updating report ${id}:`, updateData);
 
-    const report = await ReportModel.findById(id);
+    // Try to find report by either MongoDB ObjectId or shortId
+    let report;
+    
+    // Check if the id is a valid MongoDB ObjectId (24 hex characters)
+    if (id.match(/^[0-9a-fA-F]{24}$/)) {
+      // It's a MongoDB ObjectId
+      report = await ReportModel.findById(id);
+    } else {
+      // It's likely a shortId
+      report = await ReportModel.findOne({ shortId: id });
+    }
+    
     if (!report) {
+      console.log(`❌ Report not found: ${id}`);
       return res.status(404).json({ error: "Report not found" });
     }
+
+    console.log(`✅ Found report: ${report.shortId} (${report._id})`);
 
     // Update fields if provided
     if (updateData.status) {
       const internalStatus = mapAPIStatusToInternalStatus(updateData.status);
       report.status = internalStatus;
+      console.log(`📝 Status updated: ${updateData.status} -> ${internalStatus}`);
     }
     
     if (updateData.admin_response) {
       report.admin_notes = updateData.admin_response;
+      console.log(`📝 Admin response added: ${updateData.admin_response}`);
     }
 
     await report.save();

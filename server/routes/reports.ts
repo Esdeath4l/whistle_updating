@@ -14,7 +14,7 @@ import {
 } from "../../shared/api";
 import ReportModel from "../../shared/models/report";
 import AlertModel from "../../shared/models/Alert";
-import { notifyNewReport } from "./notifications";
+import { notifyNewReport } from "../utils/realtime"; // Enhanced Socket.io notifications
 import { AuthService, AuthRequest } from "../utils/auth";
 import { DataEncryption } from "../utils/encryption";
 import { emailService } from "../email-service";
@@ -313,15 +313,28 @@ export const createReport: RequestHandler = async (req, res) => {
       shortId: savedReport.shortId
     };
 
-    // Send real-time notification to admins
+    // Send real-time Socket.io notification to admins with shortId, priority, timestamp
     try {
-      notifyNewReport(reportResponse);
-      console.log(
-        `Notification sent for report ${reportResponse.id} (${reportResponse.severity} ${reportResponse.category})`,
-      );
-    } catch (notificationError) {
-      console.error("Failed to send notification:", notificationError);
-      // Don't fail the report creation if notification fails
+      await notifyNewReport({
+        shortId: savedReport.shortId,
+  priority: savedReport.severity === 'urgent' ? 'urgent' : 
+     savedReport.severity === 'high_priority' ? 'high' :
+     savedReport.severity === 'medium_priority' ? 'medium' : 'low',
+        type: savedReport.category,
+        timestamp: savedReport.createdAt.toISOString(),
+        location: savedReport.location ? {
+          latitude: savedReport.location.lat,
+          longitude: savedReport.location.lng,
+          address: savedReport.location.address
+        } : undefined,
+        description: savedReport.message?.substring(0, 100),
+        submittedBy: 'Anonymous User',
+        hasMedia: !!(savedReport.photo_url || savedReport.video_url)
+      });
+      
+      console.log(`📢 Socket.io notification sent for report ${savedReport.shortId} [${savedReport.severity}] at ${savedReport.createdAt.toISOString()}`);
+    } catch (socketError) {
+      console.error("Failed to send Socket.io notification:", socketError);
     }
 
     const response: CreateReportResponse = {
@@ -576,15 +589,28 @@ export const createReportWithFiles: RequestHandler = async (req, res) => {
           shortId: savedReport.shortId
         };
 
-        // Send real-time notification to admins
+        // Send real-time Socket.io notification to admins
         try {
-          notifyNewReport(reportResponse);
-          console.log(
-            `Notification sent for report ${reportResponse.id} (${reportResponse.severity} ${reportResponse.category})`,
-          );
-        } catch (notificationError) {
-          console.error("Failed to send notification:", notificationError);
-          // Don't fail the report creation if notification fails
+          await notifyNewReport({
+            shortId: savedReport.shortId,
+            priority: savedReport.severity === 'urgent' ? 'urgent' : 
+                     savedReport.severity === 'high_priority' ? 'high' :
+                     savedReport.severity === 'medium_priority' ? 'medium' : 'low',
+            type: savedReport.category,
+            timestamp: savedReport.created_at.toISOString(),
+            location: savedReport.location ? {
+              latitude: savedReport.location.lat,
+              longitude: savedReport.location.lng,
+              address: savedReport.location.address
+            } : undefined,
+            description: savedReport.message?.substring(0, 100),
+            submittedBy: 'Anonymous User',
+            hasMedia: !!(savedReport.photo_url || savedReport.video_url)
+          });
+          
+          console.log(`📢 Socket.io notification sent for report ${savedReport.shortId} [${savedReport.severity}]`);
+        } catch (socketError) {
+          console.error("Failed to send Socket.io notification:", socketError);
         }
 
         const response: CreateReportResponse = {

@@ -60,11 +60,34 @@ export default function AdminSettings() {
   const testEmailService = async () => {
     setTestingEmail(true);
     try {
+      // Check both sessionStorage and localStorage for the token
+      const token = sessionStorage.getItem('adminToken') || localStorage.getItem('adminToken');
+      if (!token) {
+        toast({
+          title: "❌ Authentication Required",
+          description: "Please login first - no admin token found",
+          variant: "destructive",
+        });
+        setTestingEmail(false);
+        return;
+      }
+
+      console.log('🧪 Testing email service with token...');
       const response = await fetch("/api/notifications/test-email", {
         method: "POST",
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          recipient: emailSettings.adminEmail,
+          subject: 'Whistle Email Service Test'
+        })
       });
 
+      console.log('Test email response status:', response.status);
       const data = await response.json();
+      console.log('Test email response data:', data);
 
       if (response.ok) {
         setEmailStatus("configured");
@@ -75,13 +98,24 @@ export default function AdminSettings() {
         });
       } else {
         setEmailStatus("error");
+        console.error('Email test failed:', data);
+        
+        // Show more detailed error message
+        let errorMessage = data.error || data.message || "Email service not configured";
+        if (response.status === 401) {
+          errorMessage = "Authentication failed - please login again";
+        } else if (response.status === 403) {
+          errorMessage = "Access denied - admin privileges required";
+        }
+        
         toast({
           title: "❌ Email Test Failed",
-          description: data.message || "Email service not configured",
+          description: errorMessage,
           variant: "destructive",
         });
       }
     } catch (error) {
+      console.error('Email test error:', error);
       setEmailStatus("error");
       toast({
         title: "❌ Email Test Failed",

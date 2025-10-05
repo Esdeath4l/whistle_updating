@@ -6,7 +6,8 @@ import { DataEncryption } from "../utils/encryption";
 import { 
   encryptSensitiveData,
   decryptSensitiveData,
-  EncryptedData 
+  EncryptedData,
+  verifyToken
 } from "../middleware/authMiddleware";
 import { 
   processReportNotification, 
@@ -15,6 +16,7 @@ import {
 import { sendUrgentReportNotifications } from "../utils/notifications";
 import { broadcastToAdmins, notifyNewReport } from "../utils/realtime";
 import mongoose from "mongoose";
+import { classifyReport } from "../utils/ai-classifier";
 
 /**
  * Universal Report Creation Handler
@@ -56,6 +58,7 @@ async function processReportCreation(req: any, res: any) {
       location, 
       category, 
       severity, 
+      priority: incomingPriority,
       is_encrypted, 
       share_location 
     } = req.body;
@@ -71,9 +74,16 @@ async function processReportCreation(req: any, res: any) {
     console.log("✅ Message validation passed:", message.substring(0, 50) + "...");
     console.log("🔒 Encryption flag:", is_encrypted);
     
+    // Normalize priority: support 'priority' or legacy 'severity' fields
+    const normalizedPriority = (incomingPriority || severity || 'medium').toString().toLowerCase();
+    const allowedPriorities = ['low', 'medium', 'high', 'urgent'];
+    const finalPriority = allowedPriorities.includes(normalizedPriority) ? normalizedPriority : 'medium';
+
     const reportData: any = {
       category: category || 'feedback',
-      severity: severity || 'medium',
+      // store both for compatibility
+      priority: finalPriority,
+      severity: finalPriority,
       is_encrypted: is_encrypted === 'true' || is_encrypted === true,
       share_location: share_location === 'true' || share_location === true
     };
@@ -147,6 +157,22 @@ async function processReportCreation(req: any, res: any) {
       }
     }
     
+    // Run AI classification synchronously on the plaintext message so flagged reports
+    // are persisted and visible immediately in the dashboard.
+    try {
+      const classification = await classifyReport({ message, category: reportData.category, priority: reportData.priority });
+      reportData.ai_classification = classification;
+      // Persist top-level convenience fields for legacy compatibility and easy querying
+      if (typeof classification.score === 'number') reportData.confidentialityScore = classification.score;
+      if (typeof classification.flagged === 'boolean') reportData.flagged = classification.flagged;
+      if (classification.flagged) {
+        reportData.status = 'flagged';
+      }
+      console.log('🧠 AI classification (pre-save):', classification);
+    } catch (aiErr) {
+      console.warn('⚠️ AI classification failed (pre-save):', aiErr);
+    }
+
     console.log("💾 Saving report to MongoDB...");
     const report = new ReportModel(reportData);
     const savedReport = await report.save();
@@ -160,42 +186,42 @@ async function processReportCreation(req: any, res: any) {
     });
 
     // =======================================
-    // REAL-TIME DASHBOARD NOTIFICATION
+    // REAL-TIME DASHBOARD NOTIFICATION - INSTANT DELIVERY
     // =======================================
     
     /**
-     * Send real-time notification to admin dashboard with all required details
+     * Send INSTANT real-time notification to admin dashboard
+     * This is sent IMMEDIATELY after save for instant dashboard updates
      * Includes shortId, priority, timestamp, location, and media information
      */
+    const notificationData = {
+      shortId: savedReport.shortId,
+      // Prefer savedReport.priority, fall back to savedReport.severity for legacy
+      priority: (savedReport.priority || savedReport.severity || reportData.priority || reportData.severity || 'medium'),
+      type: reportData.category || reportData.type || 'other',
+      timestamp: savedReport.createdAt?.toISOString() || new Date().toISOString(),
+      location: reportData.location ? {
+        latitude: reportData.location.latitude || reportData.location.lat,
+        longitude: reportData.location.longitude || reportData.location.lng,
+        address: reportData.location.address
+      } : undefined,
+      hasMedia: !!(savedReport.photo_file_id || savedReport.video_file_id),
+      message: reportData.is_encrypted ? "New encrypted report" : message.substring(0, 100),
+      ai_classification: savedReport.ai_classification || reportData.ai_classification || null
+    };
+    
+    // INSTANT Socket.IO broadcast - NO await, fire and forget for speed
     try {
-      const notificationData = {
-        shortId: savedReport.shortId,
-        priority: reportData.severity || reportData.priority || 'medium',
-        severity: reportData.severity || 'medium',
-        category: reportData.category || reportData.type || 'other',
-        timestamp: savedReport.createdAt?.toISOString() || new Date().toISOString(),
-        location: reportData.location ? {
-          latitude: reportData.location.latitude || reportData.location.lat,
-          longitude: reportData.location.longitude || reportData.location.lng,
-          address: reportData.location.address
-        } : undefined,
-        hasMedia: !!(savedReport.photo_file_id || savedReport.video_file_id),
-        isEncrypted: savedReport.is_encrypted || false
-      };
-      
-      // Send real-time notification to all connected admin clients
       notifyNewReport(notificationData);
-      console.log("📡 Real-time notification sent to admin dashboard");
-      
+      console.log("⚡ INSTANT notification sent to admin dashboard");
     } catch (notificationError) {
       console.error("❌ Failed to send real-time notification:", notificationError);
-      // Don't fail the request if notification fails
     }
 
-    // Create alert and send notifications for urgent reports
-    if (reportData.severity === "urgent" || 
-        reportData.category === "medical" || 
-        reportData.category === "emergency") {
+  // Create alert and send notifications for urgent or high reports
+  if (['urgent', 'high'].includes(reportData.priority) || 
+    reportData.category === "medical" || 
+    reportData.category === "emergency") {
       
       const alert = new AlertModel({
         reportId: savedReport._id,
@@ -215,14 +241,14 @@ async function processReportCreation(req: any, res: any) {
           _id: savedReport._id.toString(),
           shortId: savedReport.shortId,
           category: reportData.category,
-          severity: reportData.severity || "high",
-          message: reportData.is_encrypted ? "New encrypted urgent report received" : reportData.message,
+          severity: reportData.priority || "high",
+          message: reportData.is_encrypted ? "New encrypted urgent/high report received" : reportData.message,
           location: reportData.location || undefined,
           timestamp: new Date()
         });
-        console.log("📧 Urgent notifications sent successfully");
+        console.log("📧 Urgent/high notifications sent successfully");
       } catch (notifyError) {
-        console.error("❌ Failed to send urgent notifications:", notifyError);
+        console.error("❌ Failed to send urgent/high notifications:", notifyError);
       }
 
       // Broadcast to admin dashboard in real-time
@@ -231,8 +257,9 @@ async function processReportCreation(req: any, res: any) {
           reportId: savedReport._id.toString(),
           shortId: savedReport.shortId,
           category: reportData.category,
-          severity: reportData.severity || "high",
-          message: reportData.is_encrypted ? "New encrypted urgent report received" : reportData.message,
+          severity: reportData.priority || "high",
+          message: reportData.is_encrypted ? "New encrypted urgent/high report received" : reportData.message,
+          ai_classification: savedReport.ai_classification || reportData.ai_classification || null,
           created_at: new Date().toISOString()
         });
         console.log("📡 Real-time broadcast sent to admin dashboard");
@@ -241,30 +268,13 @@ async function processReportCreation(req: any, res: any) {
       }
     }
 
-    // Send notification to admins about new report
-    try {
-      const notificationData: NotificationData = {
-        reportId: savedReport._id.toString(),
-        shortId: savedReport.shortId,
-        message: reportData.is_encrypted ? "New encrypted report received" : message.substring(0, 100),
-        category: reportData.category,
-        priority: reportData.severity === 'urgent' ? 'urgent' : 
-                 reportData.severity === 'high' ? 'high' : 'medium',
-        timestamp: new Date(),
-        hasMedia: !!(savedReport.photo_file_id || savedReport.video_file_id)
-      };
-      
-      processReportNotification(notificationData);
-      console.log("📢 Admin notification sent");
-    } catch (notificationError) {
-      console.warn("⚠️ Failed to send notification:", notificationError);
-    }
-    
+    // ⚡ INSTANT RESPONSE - Don't wait for notifications
+    // Send success response immediately for fast user experience
     res.status(201).json({
       success: true,
       data: {
         _id: savedReport._id.toString(),
-        id: savedReport._id.toString(), // For backward compatibility
+        id: savedReport._id.toString(),
         shortId: savedReport.shortId,
         is_encrypted: savedReport.is_encrypted,
         imageFiles: req.files?.image ? req.files.image.length : 0,
@@ -272,6 +282,58 @@ async function processReportCreation(req: any, res: any) {
         locationAccuracy: reportData.location?.accuracy
       },
       message: "Report submitted successfully",
+    });
+
+    // 🔥 BACKGROUND NOTIFICATIONS - Fire and forget (non-blocking)
+    // Process email/SMS notifications AFTER response is sent
+    setImmediate(() => {
+      try {
+        const notificationData: NotificationData = {
+          reportId: savedReport._id.toString(),
+          shortId: savedReport.shortId,
+          message: reportData.is_encrypted ? "New encrypted report received" : message.substring(0, 100),
+          category: reportData.category,
+          priority: reportData.severity === 'urgent' ? 'urgent' : 
+                   reportData.severity === 'high' ? 'high' : 'medium',
+          timestamp: new Date(),
+          hasMedia: !!(savedReport.photo_file_id || savedReport.video_file_id),
+          location: reportData.location ? {
+            lat: reportData.location.latitude || reportData.location.lat,
+            lng: reportData.location.longitude || reportData.location.lng,
+            address: reportData.location.address
+          } : undefined
+        };
+        
+        processReportNotification(notificationData).catch(err => 
+          console.error("❌ Background notification error:", err)
+        );
+        console.log("📢 Background notifications triggered");
+      } catch (notificationError) {
+        console.warn("⚠️ Failed to send background notification:", notificationError);
+      }
+    });
+
+    // 🔍 BACKGROUND AI CLASSIFICATION (non-blocking)
+    setImmediate(async () => {
+      try {
+        const classification = await classifyReport({ message: message || savedReport.message, category: reportData.category, priority: reportData.priority });
+        // Persist classification to the saved report document
+        try {
+          // Save ai_classification plus convenience fields confidentialityScore/flagged
+          const update: any = { ai_classification: classification };
+          if (typeof classification.score === 'number') update.confidentialityScore = classification.score;
+          if (typeof classification.flagged === 'boolean') update.flagged = classification.flagged;
+          // Also keep an ai_history array (push new entry)
+          update.$push = { ai_history: { $each: [{ label: classification.primaryLabel || (classification.labels && classification.labels[0]) || null, score: classification.score, flagged: classification.flagged, created_at: new Date() }], $position: 0 } };
+
+          await ReportModel.findByIdAndUpdate(savedReport._id, { $set: { ai_classification: classification, confidentialityScore: update.confidentialityScore, flagged: update.flagged }, $push: update.$push }).exec();
+          console.log('🧠 AI classification saved for report', savedReport.shortId, classification);
+        } catch (persistErr) {
+          console.error('❌ Failed to persist AI classification:', persistErr);
+        }
+      } catch (err) {
+        console.error('❌ AI classification error:', err);
+      }
     });
     
   } catch (error: any) {
@@ -369,6 +431,80 @@ export const getReports: RequestHandler = async (req, res) => {
       error: "Failed to fetch reports",
       details: error instanceof Error ? error.message : 'Unknown error'
     });
+  }
+};
+
+/**
+ * PATCH /api/reports/:shortId/status
+ * Public endpoint to update status by shortId.
+ * Accepts JSON: { status: 'reviewed' | 'flagged' | 'resolved' }
+ * Emits 'update-report' to admin clients and triggers notifications where appropriate.
+ */
+export const patchReportStatus: RequestHandler = async (req, res) => {
+  try {
+    // Require admin auth for status changes
+    try {
+      const authHeader = req.headers.authorization as string | undefined;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ success: false, error: 'Authorization header required' });
+      }
+      const token = authHeader.substring(7);
+      const decoded = verifyToken(token);
+      if (!decoded || !decoded.isAdmin) {
+        return res.status(403).json({ success: false, error: 'Admin privileges required' });
+      }
+    } catch (authErr) {
+      console.warn('⚠️ Unauthorized attempt to change report status:', authErr);
+      return res.status(401).json({ success: false, error: 'Invalid or missing token' });
+    }
+    const { shortId } = req.params as any;
+    const { status } = req.body as { status?: string };
+
+    if (!shortId) return res.status(400).json({ success: false, error: 'shortId is required' });
+    if (!status || !['reviewed', 'flagged', 'resolved'].includes(status)) {
+      return res.status(400).json({ success: false, error: 'Invalid status' });
+    }
+
+    const report = await ReportModel.findOne({ shortId });
+    if (!report) return res.status(404).json({ success: false, error: 'Report not found' });
+
+    report.status = status as any;
+    if (status === 'resolved') report.resolved_at = new Date();
+    await report.save();
+
+    // Emit update to admin clients
+    try {
+      broadcastToAdmins('update-report', {
+        shortId: report.shortId,
+        status: report.status,
+        _id: report._id.toString()
+      });
+      console.log('📡 Emitted update-report for', report.shortId);
+    } catch (emitErr) {
+      console.warn('⚠️ Failed to emit update-report:', emitErr);
+    }
+
+    // Notify admins by email/SMS for flagged/resolved events using existing template
+    if (['flagged', 'resolved'].includes(status)) {
+      try {
+        await sendUrgentReportNotifications({
+          _id: report._id.toString(),
+          shortId: report.shortId,
+          category: report.category || 'report',
+          severity: (report.priority || report.severity) || 'medium',
+          message: report.message || (report.encrypted_message ? 'Encrypted content' : ''),
+          location: report.location ? { latitude: (report.location as any).latitude || (report.location as any).lat, longitude: (report.location as any).longitude || (report.location as any).lng, city: (report.location as any).city, country: (report.location as any).country } : undefined,
+          timestamp: new Date()
+        });
+      } catch (notifyErr) {
+        console.warn('⚠️ Failed to send status-change notifications:', notifyErr);
+      }
+    }
+
+    res.json({ success: true, data: { shortId: report.shortId, status: report.status } });
+  } catch (error) {
+    console.error('❌ Error updating report status:', error);
+    res.status(500).json({ success: false, error: 'Failed to update status' });
   }
 };
 

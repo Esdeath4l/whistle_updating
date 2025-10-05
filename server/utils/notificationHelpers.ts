@@ -53,6 +53,8 @@ export interface NotificationData {
   };
   hasMedia?: boolean;
   timestamp: Date;
+  isEscalation?: boolean;
+  hoursUnprocessed?: number;
 }
 
 export interface EmailTemplate {
@@ -127,27 +129,41 @@ const generateEmailTemplate = (notification: NotificationData): EmailTemplate =>
   const emoji = priorityEmojis[notification.priority];
   const color = priorityColors[notification.priority];
   
-  const subject = `${emoji} New ${notification.priority.toUpperCase()} Report: ${notification.shortId}`;
+  // Special handling for escalation emails
+  const isEscalation = notification.isEscalation;
+  const escalationPrefix = isEscalation ? '🚨 ESCALATION ALERT: ' : '';
+  const escalationSuffix = isEscalation ? ` (UNPROCESSED FOR ${notification.hoursUnprocessed} HOURS)` : '';
+  
+  const subject = `${escalationPrefix}${emoji} ${isEscalation ? 'URGENT' : notification.priority.toUpperCase()} Report: ${notification.shortId}${escalationSuffix}`;
   
   const locationInfo = notification.location ? 
     `<strong>Location:</strong> ${notification.location.address || `${notification.location.lat}, ${notification.location.lng}`}<br>` : '';
   
   const mediaInfo = notification.hasMedia ? 
     '<strong>Media:</strong> Contains image/video evidence<br>' : '';
+    
+  const escalationInfo = isEscalation ? 
+    `<div style="background-color: #ef4444; color: white; padding: 15px; margin-bottom: 20px; border-radius: 5px;">
+      <h3 style="margin: 0; color: white;">🚨 ESCALATION ALERT</h3>
+      <p style="margin: 5px 0 0 0;">This report has been unprocessed for <strong>${notification.hoursUnprocessed} hours</strong> and requires immediate administrative attention!</p>
+    </div>` : '';
   
   const html = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <div style="background-color: ${color}; color: white; padding: 20px; text-align: center;">
-        <h1 style="margin: 0;">${emoji} Whistle Report Alert</h1>
-        <p style="margin: 5px 0 0 0;">Priority: ${notification.priority.toUpperCase()}</p>
+      <div style="background-color: ${isEscalation ? '#ef4444' : color}; color: white; padding: 20px; text-align: center;">
+        <h1 style="margin: 0;">${isEscalation ? '🚨 ESCALATION ALERT' : `${emoji} Whistle Report Alert`}</h1>
+        <p style="margin: 5px 0 0 0;">Priority: ${isEscalation ? 'URGENT ESCALATION' : notification.priority.toUpperCase()}</p>
       </div>
       
       <div style="padding: 20px; border: 1px solid #ddd;">
+        ${escalationInfo}
+        
         <h2>Report Details</h2>
         <p><strong>Report ID:</strong> ${notification.shortId}</p>
         <p><strong>Category:</strong> ${notification.category}</p>
         <p><strong>Priority:</strong> ${notification.priority}</p>
         <p><strong>Timestamp:</strong> ${notification.timestamp.toISOString()}</p>
+        ${isEscalation ? `<p><strong>Hours Unprocessed:</strong> ${notification.hoursUnprocessed}</p>` : ''}
         ${locationInfo}
         ${mediaInfo}
         
@@ -158,9 +174,24 @@ const generateEmailTemplate = (notification: NotificationData): EmailTemplate =>
         
         <div style="margin-top: 20px; text-align: center;">
           <a href="${process.env.ADMIN_DASHBOARD_URL || 'http://localhost:8080/admin'}" 
-             style="background-color: ${color}; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">
-            View in Dashboard
+             style="background-color: ${color}; color: white; padding: 12px 25px; text-decoration: none; border-radius: 5px; display: inline-block; margin: 5px; font-weight: bold;">
+            📱 Open Dashboard
           </a>
+          <br>
+          <a href="${process.env.REPORTS_PAGE_URL || 'http://localhost:8080'}" 
+             style="background-color: #6b7280; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin: 5px;">
+            📋 View All Reports
+          </a>
+        </div>
+        
+        ${isEscalation ? `
+        <div style="margin-top: 15px; padding: 10px; background-color: #fef2f2; border-left: 4px solid #ef4444;">
+          <p style="margin: 0; color: #b91c1c; font-weight: bold;">⚠️ URGENT ACTION REQUIRED</p>
+          <p style="margin: 5px 0 0 0; color: #7f1d1d; font-size: 14px;">This escalation requires immediate administrative review. Click the dashboard link above to take action on your mobile device.</p>
+        </div>` : ''}
+        
+        <div style="margin-top: 20px; padding: 10px; background-color: #f0f9ff; border-left: 4px solid #3b82f6;">
+          <p style="margin: 0; color: #1e40af; font-size: 14px;"><strong>📱 Mobile Access:</strong> These links are optimized for mobile viewing. Tap to open directly on your phone.</p>
         </div>
       </div>
       
@@ -173,6 +204,7 @@ const generateEmailTemplate = (notification: NotificationData): EmailTemplate =>
   
   const text = `
 WHISTLE REPORT ALERT - ${notification.priority.toUpperCase()} PRIORITY
+${isEscalation ? `🚨 ESCALATION ALERT - UNPROCESSED FOR ${notification.hoursUnprocessed} HOURS` : ''}
 
 Report ID: ${notification.shortId}
 Category: ${notification.category}
@@ -184,7 +216,13 @@ ${notification.hasMedia ? 'Media: Contains image/video evidence' : ''}
 Message:
 ${notification.message}
 
-View in dashboard: ${process.env.ADMIN_DASHBOARD_URL || 'http://localhost:8080/admin'}
+📱 MOBILE ACCESS LINKS:
+Dashboard: ${process.env.ADMIN_DASHBOARD_URL || 'http://localhost:8080/admin'}
+All Reports: ${process.env.REPORTS_PAGE_URL || 'http://localhost:8080'}
+
+${isEscalation ? '⚠️ URGENT ACTION REQUIRED - This escalation needs immediate review!' : ''}
+
+This alert is optimized for mobile access. Tap the links above to open directly on your phone.
   `;
   
   return { subject, html, text };
@@ -239,8 +277,10 @@ export const sendSMSNotification = async (notification: NotificationData): Promi
       return false;
     }
     
-    // SMS content
-    const smsMessage = `WHISTLE ALERT: ${notification.priority.toUpperCase()} priority report ${notification.shortId}. Category: ${notification.category}. Check dashboard immediately.`;
+    // SMS content - special handling for escalations
+    const isEscalation = notification.isEscalation;
+    const escalationPrefix = isEscalation ? `🚨 ESCALATION (${notification.hoursUnprocessed}h unprocessed): ` : '';
+    const smsMessage = `${escalationPrefix}WHISTLE ALERT: ${notification.priority.toUpperCase()} priority report ${notification.shortId}. Category: ${notification.category}. ${isEscalation ? 'URGENT ACTION REQUIRED!' : 'Check dashboard immediately.'}`;
     
     // Check if using Twilio
     const smsProvider = process.env.SMS_PROVIDER;
@@ -254,21 +294,35 @@ export const sendSMSNotification = async (notification: NotificationData): Promi
       const fromNumber = process.env.TWILIO_FROM_NUMBER;
       const messagingServiceSid = process.env.TWILIO_MESSAGING_SERVICE_SID;
       
+      console.log('🔍 Checking Twilio credentials...');
+      console.log(`Account SID: ${accountSid ? 'Present' : 'Missing'}`);
+      console.log(`Auth Token: ${authToken ? 'Present' : 'Missing'}`);
+      console.log(`API Key: ${apiKey ? 'Present' : 'Missing'}`);
+      console.log(`API Secret: ${apiSecret ? 'Present' : 'Missing'}`);
+      
       if (!accountSid) {
         console.log('⚠️  Twilio Account SID not configured');
         return false;
       }
       
-      // Initialize Twilio client with either Auth Token or API Key
+      // Initialize Twilio client - prioritize Auth Token for simplicity
       let client;
-      if (apiKey && apiSecret) {
-        console.log('📱 Using Twilio API Key authentication');
-        client = twilio(apiKey, apiSecret, { accountSid });
-      } else if (authToken && authToken !== '[AuthToken]') {
-        console.log('📱 Using Twilio Auth Token authentication');
-        client = twilio(accountSid, authToken);
-      } else {
-        console.log('⚠️  Twilio credentials not properly configured');
+      try {
+        if (authToken && authToken !== '[AuthToken]' && authToken.length > 10) {
+          console.log('📱 Using Twilio Auth Token authentication');
+          client = twilio(accountSid, authToken);
+        } else if (apiKey && apiSecret && apiKey.length > 10 && apiSecret.length > 10) {
+          console.log('📱 Using Twilio API Key authentication');
+          client = twilio(apiKey, apiSecret, { accountSid });
+        } else {
+          console.log('⚠️  Twilio credentials not properly configured or invalid');
+          console.log(`Auth Token length: ${authToken ? authToken.length : 'N/A'}`);
+          console.log(`API Key length: ${apiKey ? apiKey.length : 'N/A'}`);
+          console.log(`API Secret length: ${apiSecret ? apiSecret.length : 'N/A'}`);
+          return false;
+        }
+      } catch (error) {
+        console.error('❌ Failed to initialize Twilio client:', error);
         return false;
       }
       
@@ -278,14 +332,16 @@ export const sendSMSNotification = async (notification: NotificationData): Promi
         to: ADMIN_PHONE
       };
       
-      if (messagingServiceSid) {
+      if (messagingServiceSid && messagingServiceSid.length > 10) {
         messageOptions.messagingServiceSid = messagingServiceSid;
         console.log('📱 Using Twilio Messaging Service');
-      } else if (fromNumber) {
+      } else if (fromNumber && fromNumber.length > 10) {
         messageOptions.from = fromNumber;
         console.log('📱 Using Twilio phone number');
       } else {
         console.log('⚠️  No Twilio from number or messaging service configured');
+        console.log(`From Number: ${fromNumber ? fromNumber : 'Missing'}`);
+        console.log(`Messaging Service SID: ${messagingServiceSid ? messagingServiceSid : 'Missing'}`);
         return false;
       }
       

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -28,12 +28,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
-import {
   MessageSquare,
   ArrowLeft,
   Lock,
@@ -52,7 +46,6 @@ import {
   Settings,
   Video,
   MapPin,
-  Map,
   Bell,
   Wifi,
 } from "lucide-react";
@@ -65,30 +58,12 @@ import {
 } from "@shared/api";
 import { decryptReportData } from "@/lib/encryption";
 import { notificationService } from "@/lib/notifications";
-import ReportsMap from "@/components/ReportsMap";
-// import ReportsMap from "@/components/ReportsMap"; // REMOVED: Interactive map display
+import AdminReportsList from "@/components/AdminReportsList";
+// Enhanced AdminReportsList component with comprehensive media display (no geographic map)
 // import { formatLocation } from "@/lib/geolocation";
 
-// Enhanced function for formatLocation with better error handling
-const formatLocation = (location: any) => {
-  if (!location) return 'Location not available';
-  
-  // Try to get coordinates from different possible structures
-  const lat = location.latitude || location.lat;
-  const lng = location.longitude || location.lng;
-  
-  // If we have an address, use it preferentially
-  if (location.address && location.address.trim() !== '') {
-    return location.address;
-  }
-  
-  // Otherwise, format coordinates if available
-  if (lat !== undefined && lng !== undefined && lat !== null && lng !== null) {
-    return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
-  }
-  
-  return 'Location coordinates unavailable';
-};
+// Stub function for formatLocation
+const formatLocation = (location: any) => location?.address || `${location?.latitude || 0}, ${location?.longitude || 0}`;
 
 export default function Admin() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -96,6 +71,7 @@ export default function Admin() {
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [reports, setReports] = useState<Report[]>([]);
+  const seenReportIdsRef = useRef<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [selectedReport, setSelectedReport] = useState<Report | null>(null);
   const [adminResponse, setAdminResponse] = useState("");
@@ -104,7 +80,8 @@ export default function Admin() {
   
   // Real-time notification states
   const [notifications, setNotifications] = useState<any[]>([]);
-  const [isConnected, setIsConnected] = useState(false);
+  const [isConnected, setIsConnected] = useState(false); // Start as disconnected, will be set to true when connection is established
+  const [connectionMethod, setConnectionMethod] = useState<'socket' | 'polling' | 'none'>('none');
   const [unreadCount, setUnreadCount] = useState(0);
 
   // Check for stored auth token on component mount
@@ -114,7 +91,45 @@ export default function Admin() {
       setAuthToken(storedToken);
       setIsAuthenticated(true);
     }
+    // Load seen report ids from sessionStorage to persist notification dedupe
+    try {
+      const seen = sessionStorage.getItem('seenReportIds');
+      if (seen) {
+        const arr = JSON.parse(seen) as string[];
+        seenReportIdsRef.current = new Set(arr);
+      }
+    } catch (err) {
+      console.warn('Failed to load seenReportIds from sessionStorage', err);
+    }
   }, []);
+
+  // Test initial connection when authenticated
+  useEffect(() => {
+    if (isAuthenticated && authToken) {
+      const testConnection = async () => {
+        try {
+          const response = await fetch('/api/admin/reports?limit=1', {
+            headers: { Authorization: `Bearer ${authToken}` }
+          });
+          
+          if (response.ok) {
+            console.log('✅ Initial API connection test successful');
+            // Connection will be properly set by the notification system
+          } else {
+            console.log('⚠️ Initial API connection test failed');
+            setIsConnected(false);
+            setConnectionMethod('none');
+          }
+        } catch (error) {
+          console.log('⚠️ Initial API connection error:', error);
+          setIsConnected(false);
+          setConnectionMethod('none');
+        }
+      };
+      
+      testConnection();
+    }
+  }, [isAuthenticated, authToken]);
 
   // =======================================
   // REAL-TIME NOTIFICATIONS (WITH FALLBACK)
@@ -127,102 +142,291 @@ export default function Admin() {
   useEffect(() => {
     if (isAuthenticated && authToken) {
       let pollInterval: NodeJS.Timeout;
+      let socketInstance: any = null;
       
       const initializeRealTime = async () => {
         try {
           // Try to use Socket.io if available
           try {
+            console.log('🔄 Attempting Socket.io connection...');
+            console.log('🌐 Client origin:', window.location.origin);
             const socketModule = await import('socket.io-client');
             const { io } = socketModule;
             
-            const socket = io(window.location.origin, {
+            socketInstance = io(window.location.origin, {
               transports: ['websocket', 'polling'],
-              autoConnect: true
+              autoConnect: true,
+              timeout: 5000, // 5 second timeout
+              forceNew: true // Force new connection
             });
 
-            socket.on('connect', () => {
+            let connectionTimeout = setTimeout(() => {
+              console.log('⚠️ Socket.io connection timeout, falling back to polling');
+              socketInstance.disconnect();
+              startPollingFallback();
+            }, 10000); // 10 second timeout
+
+            socketInstance.on('connect', () => {
               console.log('🔗 Connected to real-time notifications via Socket.io');
+              clearTimeout(connectionTimeout);
               setIsConnected(true);
-              socket.emit('authenticate', authToken);
+              setConnectionMethod('socket');
+              socketInstance.emit('authenticate', authToken);
             });
 
-            socket.on('disconnect', () => {
-              console.log('🔌 Disconnected from real-time notifications');
+            socketInstance.on('disconnect', (reason) => {
+              console.log('🔌 Disconnected from real-time notifications:', reason);
               setIsConnected(false);
+              setConnectionMethod('none');
+              
+              // Auto-reconnect after 5 seconds if not intentional
+              if (reason !== 'io client disconnect') {
+                setTimeout(() => {
+                  console.log('🔄 Attempting reconnection...');
+                  startPollingFallback();
+                }, 5000);
+              }
             });
 
-            socket.on('notification', (notification) => {
-              console.log('📨 Received notification:', notification);
+            socketInstance.on('authenticated', (data) => {
+              console.log('✅ Socket.io authentication successful:', data);
+              try {
+                // Instruct server to add this socket to the admin room explicitly
+                socketInstance.emit('join_admin_room', { requestedAt: new Date().toISOString() });
+                console.log('🔁 Requested join to admin room');
+              } catch (err) {
+                console.warn('⚠️ Failed to request admin room join:', err);
+              }
+            });
+
+            socketInstance.on('connect_error', (error) => {
+              console.log('⚠️ Socket.io connection error:', error);
+              clearTimeout(connectionTimeout);
+              setIsConnected(false);
+              setConnectionMethod('none');
+              startPollingFallback();
+            });
+
+            // Enhanced notification handlers for our new structure
+            socketInstance.on('new_report_notification', (notification) => {
+              try {
+                const id = notification?.data?.shortId || notification?.shortId;
+                if (id && seenReportIdsRef.current.has(id)) {
+                  console.log('📨 Duplicate notification ignored for', id);
+                  return;
+                }
+
+                console.log('📨 NEW REPORT - INSTANT notification received:', notification);
+
+                // Mark as seen locally to prevent duplicates
+                if (id) {
+                  seenReportIdsRef.current.add(id);
+                  try { sessionStorage.setItem('seenReportIds', JSON.stringify(Array.from(seenReportIdsRef.current))); } catch (err) { /* ignore */ }
+                }
+
+                // IMMEDIATE UI update
+                setNotifications(prev => [notification, ...prev.slice(0, 9)]);
+                setUnreadCount(prev => prev + 1);
+
+                // IMMEDIATE sound notification - NO await
+                notificationService.triggerNewReportNotification({
+                  reportId: notification.data.shortId,
+                  category: notification.data.reportType,
+                  severity: notification.data.priority,
+                  priority: notification.data.priority
+                });
+
+                // IMMEDIATE browser notification
+                if ('Notification' in window && Notification.permission === 'granted') {
+                  new Notification(`🆕 New Report: ${notification.data.shortId}`, {
+                    body: `${notification.data.priority.toUpperCase()} priority ${notification.data.reportType} report\n${notification.data.location}`,
+                    icon: '/favicon.ico',
+                    tag: notification.data.shortId,
+                    requireInteraction: notification.data.priority === 'urgent' || notification.data.priority === 'high'
+                  });
+                }
+
+                // IMMEDIATE fetch of new reports - fire and forget
+                fetchReports().catch(err => console.error('Failed to refresh reports:', err));
+              } catch (err) {
+                console.error('Error handling new_report_notification:', err);
+              }
+            });
+
+            // Fallback listener in case server emitted a global notification when admin room was empty
+            socketInstance.on('new_report_notification_fallback', (notification) => {
+              try {
+                const id = notification?.data?.shortId || notification?.shortId;
+                if (id && seenReportIdsRef.current.has(id)) {
+                  console.log('📨 Duplicate fallback notification ignored for', id);
+                  return;
+                }
+
+                console.log('📨 NEW REPORT - FALLBACK notification received:', notification);
+
+                if (id) {
+                  seenReportIdsRef.current.add(id);
+                  try { sessionStorage.setItem('seenReportIds', JSON.stringify(Array.from(seenReportIdsRef.current))); } catch (err) { /* ignore */ }
+                }
+
+                // Keep behavior same as primary handler
+                setNotifications(prev => [notification, ...prev.slice(0, 9)]);
+                setUnreadCount(prev => prev + 1);
+
+                notificationService.triggerNewReportNotification({
+                  reportId: notification.data?.shortId || notification.shortId,
+                  category: notification.data?.reportType || notification.category,
+                  severity: notification.data?.priority || notification.severity,
+                  priority: notification.data?.priority || notification.severity
+                });
+
+                if ('Notification' in window && Notification.permission === 'granted') {
+                  new Notification(`🆕 New Report (fallback): ${notification.data?.shortId || notification.shortId}`, {
+                    body: `${(notification.data?.priority || notification.severity || '').toUpperCase()} priority ${(notification.data?.reportType || notification.category || '')} report\n${notification.data?.location || notification.location || ''}`,
+                    icon: '/favicon.ico',
+                    tag: notification.data?.shortId || notification.shortId
+                  });
+                }
+
+                fetchReports().catch(err => console.error('Failed to refresh reports (fallback):', err));
+              } catch (err) {
+                console.error('Error handling fallback notification:', err);
+              }
+            });
+
+            socketInstance.on('report_update_notification', (notification) => {
+              console.log('🔄 Report update notification:', notification);
+              
+              setNotifications(prev => [notification, ...prev.slice(0, 9)]);
+              setUnreadCount(prev => prev + 1);
+              fetchReports();
+              
+              if ('Notification' in window && Notification.permission === 'granted') {
+                new Notification(`📝 Report Updated: ${notification.data.shortId}`, {
+                  body: notification.data.message,
+                  icon: '/favicon.ico',
+                  tag: `update_${notification.data.shortId}`
+                });
+              }
+            });
+
+            socketInstance.on('priority_escalation_notification', (notification) => {
+              console.log('� Priority escalation notification:', notification);
+              
+              setNotifications(prev => [notification, ...prev.slice(0, 9)]);
+              setUnreadCount(prev => prev + 1);
+              fetchReports();
+              
+              if ('Notification' in window && Notification.permission === 'granted') {
+                new Notification(`🚨 URGENT: ${notification.data.shortId}`, {
+                  body: notification.data.message,
+                  icon: '/favicon.ico',
+                  tag: `escalation_${notification.data.shortId}`,
+                  requireInteraction: true // Keep notification until user clicks
+                });
+              }
+            });
+
+            socketInstance.on('connection_status_update', (statusUpdate) => {
+              console.log('📡 Connection status update:', statusUpdate);
+              setIsConnected(statusUpdate.data.isOnline);
+            });
+
+            socketInstance.on('admin_notification', (notification) => {
+              console.log('📢 Admin notification:', notification);
               
               setNotifications(prev => [notification, ...prev.slice(0, 9)]);
               setUnreadCount(prev => prev + 1);
               
-              if (notification.type === 'NEW_REPORT') {
-                fetchReports();
-              }
-              
               if ('Notification' in window && Notification.permission === 'granted') {
-                new Notification(`Whistle Admin: ${notification.data.message}`, {
+                new Notification(`📢 Admin Alert`, {
+                  body: notification.data.message,
                   icon: '/favicon.ico',
-                  tag: notification.data.shortId
+                  tag: `admin_${notification.id}`
                 });
               }
             });
 
-            return () => socket.disconnect();
+            // Send heartbeat every 30 seconds to maintain connection
+            const heartbeat = setInterval(() => {
+              if (socketInstance.connected) {
+                socketInstance.emit('ping');
+              }
+            }, 30000);
+
+            return () => {
+              clearTimeout(connectionTimeout);
+              clearInterval(heartbeat);
+              if (socketInstance) {
+                socketInstance.disconnect();
+              }
+            };
             
           } catch (socketError) {
             console.log('⚠️ Socket.io not available, using polling fallback');
-            
-            // Fallback: Poll for new reports every 30 seconds
-            setIsConnected(true); // Indicate we have some form of real-time updates
-            
-            pollInterval = setInterval(async () => {
-              try {
-                const response = await fetch('/api/admin/reports?limit=1', {
-                  headers: { Authorization: `Bearer ${authToken}` }
-                });
-                
-                if (response.ok) {
-                  const data = await response.json();
-                  const latestReport = data.reports?.[0];
-                  
-                  if (latestReport && reports.length > 0) {
-                    const isNewReport = !reports.find(r => r.id === latestReport.id);
-                    if (isNewReport) {
-                      setNotifications(prev => [{
-                        type: 'NEW_REPORT',
-                        data: {
-                          shortId: latestReport.shortId,
-                          priority: latestReport.severity || 'medium',
-                          message: `New ${latestReport.severity} priority report received: ${latestReport.shortId}`
-                        },
-                        timestamp: new Date().toISOString()
-                      }, ...prev.slice(0, 9)]);
-                      
-                      setUnreadCount(prev => prev + 1);
-                      fetchReports();
-                    }
-                  }
-                }
-              } catch (error) {
-                console.error('Polling error:', error);
-              }
-            }, 30000); // Poll every 30 seconds
+            startPollingFallback();
           }
           
         } catch (error) {
           console.log('⚠️ Real-time notifications unavailable:', error);
+          startPollingFallback();
         }
+      };
+
+      // Polling fallback function
+      const startPollingFallback = () => {
+        console.log('🔄 Starting polling fallback...');
+        setConnectionMethod('polling');
+        setIsConnected(true); // Indicate we have some form of real-time updates
+        
+        pollInterval = setInterval(async () => {
+          try {
+            const response = await fetch('/api/admin/reports?limit=1', {
+              headers: { Authorization: `Bearer ${authToken}` }
+            });
+            
+            if (response.ok) {
+              const data = await response.json();
+              const latestReport = data.reports?.[0];
+              
+              if (latestReport && reports.length > 0) {
+                const isNewReport = !reports.find(r => r.id === latestReport.id);
+                if (isNewReport) {
+                  setNotifications(prev => [{
+                    type: 'NEW_REPORT',
+                    data: {
+                      shortId: latestReport.shortId,
+                      priority: latestReport.severity || 'medium',
+                      message: `New ${latestReport.severity} priority report received: ${latestReport.shortId}`
+                    },
+                    timestamp: new Date().toISOString()
+                  }, ...prev.slice(0, 9)]);
+                  
+                  setUnreadCount(prev => prev + 1);
+                  fetchReports();
+                }
+              }
+            } else {
+              // If API is failing, mark as disconnected
+              setIsConnected(false);
+              setConnectionMethod('none');
+            }
+          } catch (error) {
+            console.error('Polling error:', error);
+            setIsConnected(false);
+            setConnectionMethod('none');
+          }
+        }, 30000); // Poll every 30 seconds
       };
       
       initializeRealTime();
       
       return () => {
         if (pollInterval) clearInterval(pollInterval);
+        if (socketInstance) socketInstance.disconnect();
       };
     }
-  }, [isAuthenticated, authToken, reports]);
+  }, [isAuthenticated, authToken]);
 
   // Request notification permission
   useEffect(() => {
@@ -230,50 +434,6 @@ export default function Admin() {
       Notification.requestPermission();
     }
   }, []);
-
-  // Function to mark report as viewed by current admin
-  const markReportAsViewed = async (reportId: string) => {
-    try {
-      const token = localStorage.getItem("adminToken");
-      if (!token) return;
-
-      await fetch(`/api/reports/${reportId}/viewed`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-      
-      console.log(`📋 Report ${reportId} marked as viewed`);
-    } catch (error) {
-      console.error("Error marking report as viewed:", error);
-    }
-  };
-
-  // Function to mark report as resolved by current admin
-  const markReportAsResolved = async (reportId: string) => {
-    try {
-      const token = localStorage.getItem("adminToken");
-      if (!token) return;
-
-      const response = await fetch(`/api/reports/${reportId}/resolve`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-
-      if (response.ok) {
-        console.log(`✅ Report ${reportId} marked as resolved`);
-        // Refresh reports to show updated status
-        fetchReports();
-      }
-    } catch (error) {
-      console.error("Error marking report as resolved:", error);
-    }
-  };
 
   const fetchReports = useCallback(async () => {
     if (!authToken) {
@@ -300,6 +460,15 @@ export default function Admin() {
       if (response.ok) {
         const data: GetReportsResponse = await response.json();
         setReports(data.reports);
+        try {
+          // Update seen IDs to avoid duplicate notifications for already loaded reports
+          const ids = new Set<string>(data.reports.map(r => r.shortId || r.id));
+          // Merge into existing seen set
+          ids.forEach(id => seenReportIdsRef.current.add(id));
+          console.log('🔁 Updated seenReportIds with fetched reports', ids.size);
+        } catch (e) {
+          console.warn('⚠️ Failed to update seenReportIds:', e);
+        }
         console.log(`✅ Fetched ${data.reports.length} reports for admin dashboard`);
       } else if (response.status === 401) {
         console.log("❌ Authentication failed, logging out");
@@ -403,25 +572,51 @@ export default function Admin() {
       if (response) {
         updateData.admin_response = response; // Use admin_response as defined in the interface
       }
+      // Prefer public PATCH endpoint by shortId (keeps route simple for clients)
+      // If selectedReport has a shortId use it; otherwise fallback to admin endpoint
+      const shortId = selectedReport?.shortId || undefined;
+      let res: Response;
 
-      // Use the admin-specific update endpoint
-      const res = await fetch(`/api/admin/reports/${reportId}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${authToken}`,
-        },
-        body: JSON.stringify(updateData),
-      });
+      if (shortId) {
+        res = await fetch(`/api/reports/${shortId}/status`, {
+          method: 'PATCH',
+          headers: { 
+            'Content-Type': 'application/json',
+            ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
+          },
+          body: JSON.stringify({ status })
+        });
+      } else {
+        // Fall back to admin update when we only have internal id
+        res = await fetch(`/api/admin/reports/${reportId}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify(updateData),
+        });
+      }
 
       if (res.ok) {
         const result = await res.json();
-        console.log("✅ Report status updated:", result);
+        console.log('✅ Report status updated:', result);
+
+        // Optimistically update UI: update reports list and selectedReport
+        setReports(prev => prev.map(r => r.shortId === (result.data?.shortId || selectedReport?.shortId) ? { ...r, status: result.data?.status || status } : r));
+        if (selectedReport) setSelectedReport(prev => prev ? { ...prev, status } : prev);
+
+        // Keep server-side sync as well
         fetchReports();
-        setSelectedReport(null);
-        setAdminResponse("");
+        setAdminResponse('');
+        // persist seen ids to sessionStorage
+        try {
+          sessionStorage.setItem('seenReportIds', JSON.stringify(Array.from(seenReportIdsRef.current)));
+        } catch (err) {
+          console.warn('Failed to persist seenReportIds', err);
+        }
       } else {
-        console.error("Failed to update report:", res.status);
+        console.error('Failed to update report:', res.status);
       }
     } catch (error) {
       console.error("Error updating report:", error);
@@ -667,9 +862,22 @@ export default function Admin() {
               
               {/* Real-time Status Indicator */}
               <div className="flex items-center gap-1 mt-1">
-                <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-gray-400'}`} />
+                <div className={`w-2 h-2 rounded-full ${
+                  isConnected 
+                    ? connectionMethod === 'socket' 
+                      ? 'bg-green-500' 
+                      : 'bg-yellow-500'
+                    : 'bg-red-400'
+                }`} />
                 <span className="text-xs text-muted-foreground">
-                  {isConnected ? 'Live' : 'Offline'}
+                  {isConnected 
+                    ? connectionMethod === 'socket' 
+                      ? 'Live (Real-time)' 
+                      : connectionMethod === 'polling'
+                        ? 'Live (Polling)'
+                        : 'Connected'
+                    : 'Offline'
+                  }
                 </span>
               </div>
             </div>
@@ -701,13 +909,10 @@ export default function Admin() {
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
             <div>
               <h2 className="text-2xl font-bold mb-2">
-                Harassment Reports Dashboard
+                Reports Dashboard
               </h2>
               <p className="text-muted-foreground">
-                {reports.length} total harassment complaints received
-              </p>
-              <p className="text-sm text-muted-foreground mt-1">
-                All reports are forwarded here for admin review and response
+                {reports.length} total reports
               </p>
             </div>
 
@@ -731,7 +936,43 @@ export default function Admin() {
                 </SelectContent>
               </Select>
 
-              <Button onClick={fetchReports} variant="outline" size="sm">
+              <Button
+                onClick={async () => {
+                  await fetchReports();
+                  try {
+                    // After fetching, identify any reports not previously seen and replay local notifications
+                    const newlyFetched = reports.filter(r => !seenReportIdsRef.current.has(r.shortId || r.id));
+                    if (newlyFetched.length > 0) {
+                      console.log('🔁 Replaying unseen notifications for fetched reports:', newlyFetched.map(r => r.shortId || r.id));
+                      for (const r of newlyFetched) {
+                        const nid = r.shortId || r.id;
+                        seenReportIdsRef.current.add(nid);
+                        const notification = {
+                          type: 'NEW_REPORT',
+                          data: {
+                            shortId: r.shortId || r.id,
+                            priority: r.severity || r.priority || 'medium',
+                            message: `New ${r.severity || r.priority} priority report received: ${r.shortId || r.id}`
+                          },
+                          timestamp: new Date().toISOString()
+                        };
+                        setNotifications(prev => [notification, ...prev.slice(0,9)]);
+                        setUnreadCount(prev => prev + 1);
+                        notificationService.triggerNewReportNotification({
+                          reportId: r.shortId || r.id,
+                          category: r.category || 'report',
+                          severity: r.severity || r.priority || 'medium',
+                          priority: r.severity || r.priority || 'medium'
+                        });
+                      }
+                    }
+                  } catch (err) {
+                    console.error('Error replaying unseen notifications after refresh:', err);
+                  }
+                }}
+                variant="outline"
+                size="sm"
+              >
                 Refresh
               </Button>
 
@@ -840,91 +1081,12 @@ export default function Admin() {
               >
                 Add Demo Data
               </Button>
-              
-              {/* Test Notifications Button */}
-              <Button
-                onClick={async () => {
-                  try {
-                    console.log("🧪 Testing notification systems...");
-                    
-                    const response = await fetch("/api/test/notifications", {
-                      method: "GET",
-                      headers: {
-                        "Authorization": `Bearer ${localStorage.getItem("adminToken")}`,
-                        "Content-Type": "application/json"
-                      }
-                    });
-
-                    const result = await response.json();
-                    
-                    if (result.success) {
-                      console.log("🧪 Notification test results:", result.results);
-                      
-                      // Show detailed results
-                      let message = "Notification Test Results:\n\n";
-                      
-                      if (result.results.realTime.status === 'success') {
-                        message += "✅ Real-time notifications: Working\n";
-                      } else {
-                        message += `❌ Real-time notifications: Failed (${result.results.realTime.error || 'Unknown error'})\n`;
-                      }
-                      
-                      if (result.results.sms.status === 'success') {
-                        message += "✅ SMS notifications: Working\n";
-                      } else if (result.results.sms.status === 'not_configured') {
-                        message += "⚠️ SMS notifications: Not configured\n";
-                      } else {
-                        message += `❌ SMS notifications: Failed (${result.results.sms.error || 'Unknown error'})\n`;
-                      }
-                      
-                      if (result.results.email.status === 'success') {
-                        message += "✅ Email notifications: Working\n";
-                      } else {
-                        message += `❌ Email notifications: Failed (${result.results.email.error || 'Unknown error'})\n`;
-                      }
-                      
-                      // Add recommendations
-                      if (result.recommendations) {
-                        message += "\nRecommendations:\n";
-                        Object.entries(result.recommendations).forEach(([key, rec]) => {
-                          if (rec) message += `• ${key}: ${rec}\n`;
-                        });
-                      }
-                      
-                      alert(message);
-                    } else {
-                      console.error("Notification test failed:", result);
-                      alert("Notification test failed. Check console for details.");
-                    }
-                  } catch (error) {
-                    console.error("Error testing notifications:", error);
-                    alert("Error testing notifications. Check console for details.");
-                  }
-                }}
-                variant="outline"
-                size="sm"
-                className="gap-2"
-              >
-                <Bell className="w-4 h-4" />
-                Test Notifications
-              </Button>
             </div>
           </div>
 
-          {/* Reports Dashboard with Tabs */}
-          <Tabs defaultValue="list" className="w-full">
-            <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger value="list" className="flex items-center gap-2">
-                <MessageSquare className="w-4 h-4" />
-                Reports List
-              </TabsTrigger>
-              <TabsTrigger value="map" className="flex items-center gap-2">
-                <Map className="w-4 h-4" />
-                Geographic Map
-              </TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="list">
+          {/* Reports Dashboard */}
+          <div className="w-full">
+            {/* Reports List */}
               {/* Reports List */}
           {loading ? (
             <div className="text-center py-12">
@@ -980,13 +1142,20 @@ export default function Admin() {
                             Plain Text
                           </Badge>
                         )}
-                        {(report.imageFileIds && report.imageFileIds.length > 0) && (
+                        {/* Enhanced media file indicators - supports multiple formats */}
+                        {((report.imageFileIds && report.imageFileIds.length > 0) || 
+                          (report.photo_file_id) || 
+                          (report.files?.photo) || 
+                          (report.photo_url)) && (
                           <Badge variant="outline">
                             <ImageIcon className="w-3 h-3 mr-1" />
                             Photo
                           </Badge>
                         )}
-                        {(report.videoFileIds && report.videoFileIds.length > 0) && (
+                        {((report.videoFileIds && report.videoFileIds.length > 0) || 
+                          (report.video_file_id) || 
+                          (report.files?.video) || 
+                          (report.video_url)) && (
                           <Badge
                             variant="outline"
                             className="bg-purple-50 text-purple-700 border-purple-300"
@@ -1043,8 +1212,17 @@ export default function Admin() {
                             variant="outline"
                             size="sm"
                             onClick={() => {
+                              console.log("🔍 Opening report modal for:", report.shortId);
+                              console.log("📊 Report media data:", {
+                                photo_file_id: report.photo_file_id,
+                                video_file_id: report.video_file_id,
+                                imageFileIds: report.imageFileIds,
+                                videoFileIds: report.videoFileIds,
+                                files: report.files,
+                                photo_url: report.photo_url,
+                                video_url: report.video_url
+                              });
                               setSelectedReport(report);
-                              markReportAsViewed(report.id);
                             }}
                           >
                             <Eye className="w-4 h-4 mr-2" />
@@ -1068,6 +1246,17 @@ export default function Admin() {
                                 <div className="mt-1">
                                   {getStatusBadge(selectedReport.status)}
                                 </div>
+                                {/* AI classification summary */}
+                                {((selectedReport as any).ai_classification || (selectedReport as any).moderation) && (
+                                  <div className="mt-2 text-sm text-gray-600">
+                                    {((selectedReport as any).ai_classification?.primaryLabel || (selectedReport as any).moderation?.primaryLabel) && (
+                                      <span className="inline-block mr-2 px-2 py-0.5 rounded bg-gray-100">AI: {((selectedReport as any).ai_classification?.primaryLabel || (selectedReport as any).moderation?.primaryLabel)}</span>
+                                    )}
+                                    {typeof (selectedReport as any).ai_classification?.confidence === 'number' && (
+                                      <span className="text-xs text-gray-500">Confidence: {Math.round((selectedReport as any).ai_classification.confidence * 100)}%</span>
+                                    )}
+                                  </div>
+                                )}
                               </div>
 
                               <div>
@@ -1099,10 +1288,11 @@ export default function Admin() {
                                 </div>
                               </div>
 
-                              {/* Photo Evidence */}
+                              {/* Enhanced Photo Evidence Display - supports multiple formats */}
                               {((selectedReport.imageFileIds && selectedReport.imageFileIds.length > 0) || 
-                                (selectedReport.photo_file_id) || 
-                                (selectedReport.files?.photo)) && (
+                                selectedReport.photo_file_id || 
+                                selectedReport.files?.photo || 
+                                selectedReport.photo_url) && (
                                 <div>
                                   <Label className="text-sm font-medium">
                                     Photo Evidence
@@ -1113,159 +1303,219 @@ export default function Admin() {
                                       </Badge>
                                     )}
                                   </Label>
-                                  <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    {/* Handle multiple image file IDs */}
-                                    {selectedReport.imageFileIds?.map((fileId, index) => (
-                                      <div key={fileId} className="relative">
+                                  <div className="mt-2 space-y-2">
+                                    {/* Handle GridFS imageFileIds array */}
+                                    {selectedReport.imageFileIds && selectedReport.imageFileIds.map((fileId, index) => (
+                                      <div key={fileId} className="border rounded-lg p-2">
                                         <img
-                                          src={`/api/reports/file/${fileId}`}
+                                          src={`/api/files/images/${fileId}`}
                                           alt={`Report evidence ${index + 1}`}
-                                          className="w-full h-auto rounded-lg border cursor-pointer hover:opacity-80 transition-opacity"
-                                          onError={(e) => {
-                                            console.error("Failed to load photo:", e);
-                                            (e.target as HTMLImageElement).src = "/placeholder.svg";
+                                          className="max-w-full h-auto rounded-lg border mb-2"
+                                          style={{ maxHeight: "400px" }}
+                                          onLoad={() => {
+                                            console.log(`✅ Image ${index + 1} loaded successfully from GridFS`);
                                           }}
-                                          onClick={() => window.open(`/api/reports/file/${fileId}`, '_blank')}
+                                          onError={(e) => {
+                                            console.error("❌ Failed to load photo from GridFS:", fileId);
+                                            const target = e.target as HTMLImageElement;
+                                            target.style.display = "none";
+                                            
+                                            // Add error placeholder with retry option
+                                            const errorDiv = document.createElement('div');
+                                            errorDiv.className = "p-4 border border-red-200 rounded-lg bg-red-50 text-red-700 text-center";
+                                            errorDiv.innerHTML = `
+                                              <p>❌ Failed to load image ${index + 1}</p>
+                                              <p class="text-sm">GridFS File ID: ${fileId}</p>
+                                              <button onclick="this.parentElement.nextElementSibling.style.display='block'; this.parentElement.style.display='none'" class="mt-2 px-2 py-1 bg-red-100 border border-red-300 rounded text-xs hover:bg-red-200">
+                                                🔄 Retry
+                                              </button>
+                                            `;
+                                            target.parentNode?.insertBefore(errorDiv, target);
+                                          }}
                                         />
-                                        <p className="text-xs text-muted-foreground mt-1">
-                                          Photo {index + 1} - Click to view full size
-                                        </p>
+                                        <p className="text-xs text-muted-foreground">Image {index + 1} - ID: {fileId}</p>
                                       </div>
                                     ))}
                                     
-                                    {/* Handle single photo file ID */}
+                                    {/* Handle single photo_file_id */}
                                     {selectedReport.photo_file_id && !selectedReport.imageFileIds && (
-                                      <div className="relative">
+                                      <div className="border rounded-lg p-2">
                                         <img
-                                          src={`/api/reports/file/${selectedReport.photo_file_id}`}
-                                          alt="Report evidence"
-                                          className="w-full h-auto rounded-lg border cursor-pointer hover:opacity-80 transition-opacity"
-                                          onError={(e) => {
-                                            console.error("Failed to load photo:", e);
-                                            (e.target as HTMLImageElement).src = "/placeholder.svg";
+                                          src={`/api/files/${selectedReport.photo_file_id}`}
+                                          alt="Report photo evidence"
+                                          className="max-w-full h-auto rounded-lg border mb-2"
+                                          style={{ maxHeight: "400px" }}
+                                          onLoad={() => {
+                                            console.log(`✅ Photo loaded successfully from GridFS: ${selectedReport.photo_file_id}`);
                                           }}
-                                          onClick={() => window.open(`/api/reports/file/${selectedReport.photo_file_id}`, '_blank')}
+                                          onError={(e) => {
+                                            console.error("❌ Failed to load photo from GridFS:", selectedReport.photo_file_id);
+                                            const target = e.target as HTMLImageElement;
+                                            target.style.display = "none";
+                                            
+                                            const errorDiv = document.createElement('div');
+                                            errorDiv.className = "p-4 border border-red-200 rounded-lg bg-red-50 text-red-700 text-center";
+                                            errorDiv.innerHTML = `
+                                              <p>❌ Failed to load photo</p>
+                                              <p class="text-sm">File ID: ${selectedReport.photo_file_id}</p>
+                                              <p class="text-xs">Check server logs or try refreshing</p>
+                                            `;
+                                            target.parentNode?.insertBefore(errorDiv, target);
+                                          }}
                                         />
-                                        <p className="text-xs text-muted-foreground mt-1">
-                                          Click to view full size
+                                        <p className="text-xs text-muted-foreground">
+                                          Photo - ID: {selectedReport.photo_file_id}
+                                          {selectedReport.files?.photo && (
+                                            <span> • {selectedReport.files.photo.filename} ({(selectedReport.files.photo.size / 1024).toFixed(1)} KB)</span>
+                                          )}
                                         </p>
                                       </div>
                                     )}
-
-                                    {/* Handle files.photo structure */}
-                                    {selectedReport.files?.photo && !selectedReport.photo_file_id && !selectedReport.imageFileIds && (
-                                      <div className="relative">
+                                    
+                                    {/* Handle legacy photo_url */}
+                                    {selectedReport.photo_url && !selectedReport.photo_file_id && !selectedReport.imageFileIds && (
+                                      <div className="border rounded-lg p-2">
                                         <img
-                                          src={`/api/reports/file/${selectedReport.files.photo.id}`}
-                                          alt={selectedReport.files.photo.filename || "Report evidence"}
-                                          className="w-full h-auto rounded-lg border cursor-pointer hover:opacity-80 transition-opacity"
-                                          onError={(e) => {
-                                            console.error("Failed to load photo:", e);
-                                            (e.target as HTMLImageElement).src = "/placeholder.svg";
-                                          }}
-                                          onClick={() => window.open(`/api/reports/file/${selectedReport.files.photo.id}`, '_blank')}
+                                          src={selectedReport.photo_url}
+                                          alt="Report photo evidence"
+                                          className="max-w-full h-auto rounded-lg border mb-2"
+                                          style={{ maxHeight: "400px" }}
+                                          onLoad={() => console.log("✅ Legacy photo loaded successfully")}
+                                          onError={() => console.error("❌ Failed to load legacy photo")}
                                         />
-                                        <p className="text-xs text-muted-foreground mt-1">
-                                          {selectedReport.files.photo.filename} - Click to view full size
-                                        </p>
+                                        <p className="text-xs text-muted-foreground">Legacy Photo URL</p>
                                       </div>
                                     )}
                                   </div>
                                 </div>
                               )}
 
-                              {/* Video Evidence */}
+                              {/* Enhanced Video Evidence Display - supports multiple formats */}
                               {((selectedReport.videoFileIds && selectedReport.videoFileIds.length > 0) || 
-                                (selectedReport.video_file_id) || 
-                                (selectedReport.files?.video)) && (
+                                selectedReport.video_file_id || 
+                                selectedReport.files?.video || 
+                                selectedReport.video_url) && (
                                 <div>
                                   <Label className="text-sm font-medium">
                                     Video Evidence
                                     {selectedReport.video_metadata && (
                                       <Badge variant="outline" className="ml-2">
-                                        {(selectedReport.video_metadata.size / 1024 / 1024).toFixed(1)}MB •{" "}
-                                        {Math.floor((selectedReport.video_metadata.duration || 0) / 60)}:
-                                        {String(Math.floor((selectedReport.video_metadata.duration || 0) % 60)).padStart(2, "0")}
-                                        {selectedReport.video_metadata.isRecorded && " • Recorded"}
+                                        {(
+                                          selectedReport.video_metadata.size /
+                                          1024 /
+                                          1024
+                                        ).toFixed(1)}
+                                        MB •{" "}
+                                        {Math.floor(
+                                          (selectedReport.video_metadata
+                                            .duration || 0) / 60,
+                                        )}
+                                        :
+                                        {String(
+                                          Math.floor(
+                                            (selectedReport.video_metadata
+                                              .duration || 0) % 60,
+                                          ),
+                                        ).padStart(2, "0")}
+                                        {selectedReport.video_metadata
+                                          .isRecorded && " • Recorded"}
                                       </Badge>
                                     )}
                                   </Label>
-                                  <div className="mt-2 space-y-4">
-                                    {/* Handle multiple video file IDs */}
-                                    {selectedReport.videoFileIds?.map((fileId, index) => (
-                                      <div key={fileId} className="relative">
+                                  <div className="mt-2 space-y-2">
+                                    {/* Handle GridFS videoFileIds array */}
+                                    {selectedReport.videoFileIds && selectedReport.videoFileIds.map((fileId, index) => (
+                                      <div key={fileId} className="border rounded-lg p-2">
                                         <video
-                                          src={`/api/reports/file/${fileId}`}
+                                          src={`/api/files/videos/${fileId}`}
                                           controls
                                           preload="metadata"
-                                          className="w-full h-auto rounded-lg border bg-black"
+                                          className="max-w-full h-auto rounded-lg border bg-black mb-2"
                                           style={{ maxHeight: "400px" }}
+                                          onLoadStart={() => {
+                                            console.log(`🎥 Loading video ${index + 1}...`);
+                                          }}
+                                          onLoadedData={() => {
+                                            console.log(`✅ Video ${index + 1} loaded successfully`);
+                                          }}
                                           onError={(e) => {
-                                            console.error("Failed to load video:", e);
-                                            const videoElement = e.target as HTMLVideoElement;
-                                            videoElement.style.display = "none";
-                                            const errorDiv = document.createElement("div");
-                                            errorDiv.className = "flex items-center justify-center h-32 bg-muted rounded-lg border";
-                                            errorDiv.innerHTML = `<p class="text-sm text-muted-foreground">Failed to load video ${index + 1}</p>`;
-                                            videoElement.parentNode?.insertBefore(errorDiv, videoElement);
+                                            console.error("❌ Failed to load video:", fileId);
+                                            const target = e.target as HTMLVideoElement;
+                                            target.style.display = "none";
+                                            
+                                            // Add error placeholder
+                                            const errorDiv = document.createElement('div');
+                                            errorDiv.className = "p-4 border border-red-200 rounded-lg bg-red-50 text-red-700 text-center";
+                                            errorDiv.innerHTML = `<p>Failed to load video ${index + 1}</p><p class="text-sm">File ID: ${fileId}</p><p class="text-xs">Try refreshing or check server logs</p>`;
+                                            target.parentNode?.insertBefore(errorDiv, target);
                                           }}
                                         >
                                           Your browser does not support video playback.
                                         </video>
-                                        <p className="text-xs text-muted-foreground mt-1">
-                                          Video {index + 1}
-                                        </p>
+                                        <p className="text-xs text-muted-foreground">Video {index + 1} - ID: {fileId}</p>
                                       </div>
                                     ))}
                                     
-                                    {/* Handle single video file ID */}
+                                    {/* Handle single video_file_id */}
                                     {selectedReport.video_file_id && !selectedReport.videoFileIds && (
-                                      <div className="relative">
+                                      <div className="border rounded-lg p-2">
                                         <video
-                                          src={`/api/reports/file/${selectedReport.video_file_id}`}
+                                          src={`/api/files/${selectedReport.video_file_id}`}
                                           controls
                                           preload="metadata"
-                                          className="w-full h-auto rounded-lg border bg-black"
+                                          className="max-w-full h-auto rounded-lg border bg-black mb-2"
                                           style={{ maxHeight: "400px" }}
+                                          onLoadStart={() => {
+                                            console.log(`🎥 Loading video: ${selectedReport.video_file_id}`);
+                                          }}
+                                          onLoadedData={() => {
+                                            console.log(`✅ Video loaded successfully: ${selectedReport.video_file_id}`);
+                                          }}
                                           onError={(e) => {
-                                            console.error("Failed to load video:", e);
-                                            const videoElement = e.target as HTMLVideoElement;
-                                            videoElement.style.display = "none";
-                                            const errorDiv = document.createElement("div");
-                                            errorDiv.className = "flex items-center justify-center h-32 bg-muted rounded-lg border";
-                                            errorDiv.innerHTML = `<p class="text-sm text-muted-foreground">Failed to load video</p>`;
-                                            videoElement.parentNode?.insertBefore(errorDiv, videoElement);
+                                            console.error("❌ Failed to load video:", selectedReport.video_file_id);
+                                            const target = e.target as HTMLVideoElement;
+                                            target.style.display = "none";
+                                            
+                                            const errorDiv = document.createElement('div');
+                                            errorDiv.className = "p-4 border border-red-200 rounded-lg bg-red-50 text-red-700 text-center";
+                                            errorDiv.innerHTML = `
+                                              <p>❌ Failed to load video</p>
+                                              <p class="text-sm">File ID: ${selectedReport.video_file_id}</p>
+                                              <p class="text-xs">Check server logs or try refreshing</p>
+                                              <button onclick="window.open('/api/files/${selectedReport.video_file_id}', '_blank')" class="mt-2 px-2 py-1 bg-blue-100 border border-blue-300 rounded text-xs hover:bg-blue-200">
+                                                🔗 Open Direct Link
+                                              </button>
+                                            `;
+                                            target.parentNode?.insertBefore(errorDiv, target);
                                           }}
                                         >
                                           Your browser does not support video playback.
                                         </video>
+                                        <p className="text-xs text-muted-foreground">
+                                          Video - ID: {selectedReport.video_file_id}
+                                          {selectedReport.files?.video && (
+                                            <span> • {selectedReport.files.video.filename} ({(selectedReport.files.video.size / 1024 / 1024).toFixed(1)} MB)</span>
+                                          )}
+                                        </p>
                                       </div>
                                     )}
-
-                                    {/* Handle files.video structure */}
-                                    {selectedReport.files?.video && !selectedReport.video_file_id && !selectedReport.videoFileIds && (
-                                      <div className="relative">
+                                    
+                                    {/* Handle legacy video_url */}
+                                    {selectedReport.video_url && !selectedReport.video_file_id && !selectedReport.videoFileIds && (
+                                      <div className="border rounded-lg p-2">
                                         <video
-                                          src={`/api/reports/file/${selectedReport.files.video.id}`}
+                                          src={selectedReport.video_url}
                                           controls
                                           preload="metadata"
-                                          className="w-full h-auto rounded-lg border bg-black"
+                                          className="max-w-full h-auto rounded-lg border bg-black mb-2"
                                           style={{ maxHeight: "400px" }}
-                                          onError={(e) => {
-                                            console.error("Failed to load video:", e);
-                                            const videoElement = e.target as HTMLVideoElement;
-                                            videoElement.style.display = "none";
-                                            const errorDiv = document.createElement("div");
-                                            errorDiv.className = "flex items-center justify-center h-32 bg-muted rounded-lg border";
-                                            errorDiv.innerHTML = `<p class="text-sm text-muted-foreground">Failed to load video</p>`;
-                                            videoElement.parentNode?.insertBefore(errorDiv, videoElement);
-                                          }}
+                                          onLoadStart={() => console.log("🎥 Loading legacy video...")}
+                                          onLoadedData={() => console.log("✅ Legacy video loaded successfully")}
+                                          onError={() => console.error("❌ Failed to load legacy video")}
                                         >
                                           Your browser does not support video playback.
                                         </video>
-                                        <p className="text-xs text-muted-foreground mt-1">
-                                          {selectedReport.files.video.filename}
-                                        </p>
+                                        <p className="text-xs text-muted-foreground">Legacy Video URL</p>
                                       </div>
                                     )}
                                   </div>
@@ -1273,38 +1523,109 @@ export default function Admin() {
                               )}
 
                               {/* Location Information */}
-                              {selectedReport.location && (
+                              {selectedReport.location && (selectedReport.location.latitude || (selectedReport.location as any).lat) && (selectedReport.location.longitude || (selectedReport.location as any).lng) && (
                                 <div>
                                   <Label className="text-sm font-medium">
-                                    Location Information
+                                    Geographic Location
+                                    <Badge variant="outline" className="ml-2">
+                                      <MapPin className="w-3 h-3 mr-1" />
+                                      {(selectedReport.location as any).source || 'GPS'}
+                                    </Badge>
                                   </Label>
-                                  <div className="mt-2 p-4 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 rounded-lg">
-                                    <div className="flex items-center gap-2 mb-2">
-                                      <MapPin className="w-4 h-4 text-blue-600" />
-                                      <span className="font-medium text-sm">
-                                        {formatLocation(
-                                          selectedReport.location,
-                                        )}
-                                      </span>
-                                    </div>
-                                    {selectedReport.location.address && (
-                                      <p className="text-sm text-muted-foreground">
-                                        📍 {selectedReport.location.address}
-                                      </p>
-                                    )}
-                                    <p className="text-xs text-muted-foreground mt-1">
-                                      Accuracy: ±
-                                      {Math.round(
-                                        selectedReport.location.accuracy,
+                                  <div className="mt-2 space-y-3">
+                                    {/* Location Details */}
+                                    <div className="p-4 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                                      <div className="flex items-center gap-2 mb-2">
+                                        <MapPin className="w-4 h-4 text-blue-600" />
+                                        <span className="font-medium text-sm">
+                                          {formatLocation(selectedReport.location)}
+                                        </span>
+                                      </div>
+                                      {selectedReport.location.address && (
+                                        <p className="text-sm text-muted-foreground mb-1">
+                                          📍 {selectedReport.location.address}
+                                        </p>
                                       )}
-                                      m • Captured:{" "}
-                                      {new Date(
-                                        selectedReport.location.timestamp,
-                                      ).toLocaleString()}
-                                    </p>
+                                      {(selectedReport.location as any).city && (
+                                        <p className="text-sm text-muted-foreground mb-1">
+                                          🏙️ {(selectedReport.location as any).city}
+                                          {(selectedReport.location as any).region && `, ${(selectedReport.location as any).region}`}
+                                          {(selectedReport.location as any).country && ` - ${(selectedReport.location as any).country}`}
+                                        </p>
+                                      )}
+                                      <div className="flex flex-wrap gap-2 text-xs text-muted-foreground mt-2">
+                                        <span>Accuracy: ±{Math.round(selectedReport.location.accuracy || 0)}m</span>
+                                        {selectedReport.location.timestamp && (
+                                          <span>• Captured: {new Date(selectedReport.location.timestamp).toLocaleString()}</span>
+                                        )}
+                                        {(selectedReport.location as any).isp && (
+                                          <span>• ISP: {(selectedReport.location as any).isp}</span>
+                                        )}
+                                      </div>
+                                    </div>
                                   </div>
                                 </div>
                               )}
+
+                              {/* Complete Report Details */}
+                              <div>
+                                <Label className="text-sm font-medium">
+                                  📋 Report Information
+                                </Label>
+                                <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                  {/* Basic Info */}
+                                  <div className="space-y-3">
+                                    <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                                      <h4 className="font-medium text-sm mb-2">Report Details</h4>
+                                      <div className="space-y-1 text-xs">
+                                        <div><span className="font-medium">Report ID:</span> {selectedReport.shortId || selectedReport.id}</div>
+                                        <div><span className="font-medium">Severity:</span> {selectedReport.severity || 'Not set'}</div>
+                                        <div><span className="font-medium">Status:</span> {selectedReport.status}</div>
+                                      </div>
+                                    </div>
+                                    
+                                    <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                                      <h4 className="font-medium text-sm mb-2">Timestamps</h4>
+                                      <div className="space-y-1 text-xs">
+                                        <div><span className="font-medium">Created:</span> {formatDate(selectedReport.created_at)}</div>
+                                        <div><span className="font-medium">Updated:</span> {formatDate(selectedReport.updated_at)}</div>
+                                        {selectedReport.resolved_at && (
+                                          <div><span className="font-medium">Resolved:</span> {formatDate(selectedReport.resolved_at)}</div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  
+                                  {/* Technical Info */}
+                                  <div className="space-y-3">
+                                    <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                                      <h4 className="font-medium text-sm mb-2">Security</h4>
+                                      <div className="space-y-1 text-xs">
+                                        <div><span className="font-medium">Encryption:</span> {selectedReport.is_encrypted ? '🔒 E2E Encrypted' : '📝 Plain Text'}</div>
+                                        {selectedReport.reporter_email && (
+                                          <div><span className="font-medium">Reporter Email:</span> {selectedReport.reporter_email}</div>
+                                        )}
+                                        {selectedReport.is_offline_sync && (
+                                          <div><span className="font-medium">Offline Sync:</span> ✅ Yes</div>
+                                        )}
+                                      </div>
+                                    </div>
+                                    
+                                    {selectedReport.location && (
+                                      <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                                        <h4 className="font-medium text-sm mb-2">Location</h4>
+                                        <div className="space-y-1 text-xs">
+                                          <div><span className="font-medium">Has Location:</span> ✅ Yes</div>
+                                          <div><span className="font-medium">Coordinates:</span> {selectedReport.location.latitude?.toFixed(4)}, {selectedReport.location.longitude?.toFixed(4)}</div>
+                                          {selectedReport.location.accuracy && (
+                                            <div><span className="font-medium">Accuracy:</span> ±{selectedReport.location.accuracy}m</div>
+                                          )}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
 
                               {/* AI Moderation Results */}
                               {selectedReport.moderation && (
@@ -1450,18 +1771,6 @@ export default function Admin() {
                                 </Button>
                                 <Button
                                   size="sm"
-                                  variant="default"
-                                  className="bg-green-600 hover:bg-green-700"
-                                  onClick={() => {
-                                    markReportAsResolved(selectedReport.id);
-                                    setSelectedReport(null); // Close modal after resolving
-                                  }}
-                                >
-                                  <CheckCircle className="w-4 h-4 mr-2" />
-                                  Mark as Resolved
-                                </Button>
-                                <Button
-                                  size="sm"
                                   variant="outline"
                                   onClick={() =>
                                     updateReportStatus(
@@ -1484,27 +1793,7 @@ export default function Admin() {
               ))}
             </div>
           )}
-            </TabsContent>
-
-            <TabsContent value="map">
-              <div className="space-y-4">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <Map className="w-5 h-5" />
-                      Geographic Distribution of Reports
-                    </CardTitle>
-                    <CardDescription>
-                      Interactive map showing all reports with location data. Click on pins to view report details.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <ReportsMap reports={reports} authToken={authToken} />
-                  </CardContent>
-                </Card>
-              </div>
-            </TabsContent>
-          </Tabs>
+          </div>
         </div>
       </div>
     </div>

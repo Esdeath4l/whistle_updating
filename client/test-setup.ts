@@ -38,6 +38,11 @@ class MockMediaStream {
 
 // Mock MediaRecorder
 class MockMediaRecorder {
+  state: string;
+  ondataavailable: ((e?: any) => void) | null;
+  onstop: ((e?: any) => void) | null;
+  onstart: ((e?: any) => void) | null;
+
   static isTypeSupported() {
     return true;
   }

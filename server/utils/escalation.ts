@@ -10,6 +10,11 @@
 
 import ReportModel from "../../shared/models/report";
 import { sendUrgentReportNotifications } from "./notifications";
+import { 
+  sendEmailNotification, 
+  sendSMSNotification, 
+  NotificationData 
+} from "./notificationHelpers";
 import { notifyEscalation } from "./realtime";
 
 interface EscalationTracker {
@@ -95,16 +100,54 @@ async function processEscalation(report: any): Promise<void> {
       console.warn(`⚠️ Could not decrypt message for escalation ${shortId}:`, decryptError);
     }
     
-    // Send escalation email using urgent notification system
-    await sendUrgentReportNotifications({
+    // Send escalation notifications using enhanced notification system
+    const escalationNotification: NotificationData = {
+      reportId: report._id.toString(),
       shortId,
-      _id: report._id.toString(),
+      message: `ESCALATION ALERT: Report ${shortId} has been unprocessed for ${hoursUnprocessed} hours. This requires immediate attention from administration. Original message: ${decryptedMessage.substring(0, 150)}${decryptedMessage.length > 150 ? '...' : ''}`,
       category: category as any,
-      severity: priority as any,
-      message: `ESCALATION: Report ${shortId} has been unprocessed for ${hoursUnprocessed} hours. Preview: ${decryptedMessage.substring(0, 100)}`,
-      location: undefined,
-      timestamp: report.createdAt
-    });
+      priority: 'urgent' as any, // Always mark escalations as urgent
+      location: undefined, // Will be handled by decryption if needed
+      timestamp: report.createdAt,
+      isEscalation: true,
+      hoursUnprocessed
+    };
+    
+    console.log(`🚨 Processing escalation for report ${shortId} (${hoursUnprocessed} hours unprocessed)`);
+    
+    // Send escalation email - using enhanced notification system
+    console.log(`📧 Sending escalation email for report ${shortId}...`);
+    const emailSuccess = await sendEmailNotification(escalationNotification);
+    if (emailSuccess) {
+      console.log(`✅ Escalation email sent successfully for ${shortId}`);
+    } else {
+      console.error(`❌ Failed to send escalation email for ${shortId}`);
+    }
+    
+    // Send escalation SMS if email fails or as additional alert
+    console.log(`📱 Sending escalation SMS for report ${shortId}...`);
+    const smsSuccess = await sendSMSNotification(escalationNotification);
+    if (smsSuccess) {
+      console.log(`✅ Escalation SMS sent successfully for ${shortId}`);
+    } else {
+      console.error(`❌ Failed to send escalation SMS for ${shortId}`);
+    }
+    
+    // Also send through the original urgent notification system as backup
+    try {
+      await sendUrgentReportNotifications({
+        shortId,
+        _id: report._id.toString(),
+        category: category as any,
+        severity: 'urgent',
+        message: `ESCALATION: Report ${shortId} has been unprocessed for ${hoursUnprocessed} hours. Preview: ${decryptedMessage.substring(0, 100)}`,
+        location: undefined,
+        timestamp: report.createdAt
+      });
+      console.log(`✅ Backup escalation notification sent for ${shortId}`);
+    } catch (backupError) {
+      console.error(`❌ Failed to send backup escalation notification for ${shortId}:`, backupError);
+    }
     
     // Send real-time escalation notification
     notifyEscalation({
@@ -112,7 +155,8 @@ async function processEscalation(report: any): Promise<void> {
       priority,
       hoursUnprocessed,
       timestamp: now.toISOString(),
-      category
+      type: category,
+      reason: `Report has been unprocessed for ${hoursUnprocessed} hours`
     });
     
     // Update escalation tracker
@@ -121,7 +165,9 @@ async function processEscalation(report: any): Promise<void> {
       escalationCount: (tracker?.escalationCount || 0) + 1
     };
     
-    console.log(`🚨 Escalation processed for report ${shortId} (${hoursUnprocessed} hours unprocessed)`);
+    // Log escalation completion with notification status
+    const notificationStatus = `Email: ${emailSuccess ? '✅' : '❌'}, SMS: ${smsSuccess ? '✅' : '❌'}`;
+    console.log(`🚨 Escalation completed for report ${shortId} (${hoursUnprocessed} hours unprocessed) - ${notificationStatus}`);
     
   } catch (error) {
     console.error(`❌ Failed to process escalation for ${report.shortId}:`, error);

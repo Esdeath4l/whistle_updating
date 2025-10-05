@@ -9,7 +9,6 @@ export interface NotificationConfig {
 
 export class NotificationService {
   private static instance: NotificationService;
-  private eventSource: EventSource | null = null;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private onNewReportCallback: (() => void) | null = null;
@@ -64,115 +63,170 @@ export class NotificationService {
   }
 
   /**
-   * Play notification sound
+   * Play notification sound - Enhanced with multiple sound options
    */
-  playNotificationSound() {
+  playNotificationSound(type: 'default' | 'urgent' | 'success' = 'default') {
     try {
       // Create audio context for notification sound
       const audioContext = new (window.AudioContext ||
         (window as any).webkitAudioContext)();
 
-      // Create a simple notification beep
+      if (audioContext.state === 'suspended') {
+        audioContext.resume();
+      }
+
       const oscillator = audioContext.createOscillator();
       const gainNode = audioContext.createGain();
 
       oscillator.connect(gainNode);
       gainNode.connect(audioContext.destination);
 
-      oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
-      oscillator.frequency.exponentialRampToValueAtTime(
-        400,
-        audioContext.currentTime + 0.3,
-      );
+      // Different sound profiles for different notification types
+      switch (type) {
+        case 'urgent':
+          // Higher pitched, more attention-grabbing sound
+          oscillator.frequency.setValueAtTime(1000, audioContext.currentTime);
+          oscillator.frequency.exponentialRampToValueAtTime(
+            600,
+            audioContext.currentTime + 0.4,
+          );
+          gainNode.gain.setValueAtTime(0.4, audioContext.currentTime);
+          gainNode.gain.exponentialRampToValueAtTime(
+            0.01,
+            audioContext.currentTime + 0.4,
+          );
+          oscillator.start(audioContext.currentTime);
+          oscillator.stop(audioContext.currentTime + 0.4);
+          break;
+        
+        case 'success':
+          // Pleasant ascending tone
+          oscillator.frequency.setValueAtTime(523, audioContext.currentTime); // C5
+          oscillator.frequency.setValueAtTime(659, audioContext.currentTime + 0.1); // E5
+          oscillator.frequency.setValueAtTime(784, audioContext.currentTime + 0.2); // G5
+          gainNode.gain.setValueAtTime(0.2, audioContext.currentTime);
+          gainNode.gain.exponentialRampToValueAtTime(
+            0.01,
+            audioContext.currentTime + 0.3,
+          );
+          oscillator.start(audioContext.currentTime);
+          oscillator.stop(audioContext.currentTime + 0.3);
+          break;
 
-      gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(
-        0.01,
-        audioContext.currentTime + 0.3,
-      );
+        default:
+          // Standard notification sound
+          oscillator.frequency.setValueAtTime(800, audioContext.currentTime);
+          oscillator.frequency.exponentialRampToValueAtTime(
+            400,
+            audioContext.currentTime + 0.3,
+          );
+          gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+          gainNode.gain.exponentialRampToValueAtTime(
+            0.01,
+            audioContext.currentTime + 0.3,
+          );
+          oscillator.start(audioContext.currentTime);
+          oscillator.stop(audioContext.currentTime + 0.3);
+      }
 
-      oscillator.start(audioContext.currentTime);
-      oscillator.stop(audioContext.currentTime + 0.3);
+      console.log(`🔊 Playing ${type} notification sound`);
     } catch (error) {
       console.warn("Could not play notification sound:", error);
+      
+      // Fallback: Try to play a simple beep using HTML5 Audio
+      try {
+        const beepData = 'data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGm+DyvmMZAjuR2e7QdyYELIXK8dpWQAsObNTps21KGAVRr+bwMBsGOYTQ8ddZSAsWdM3j2WlPEQpSru35rWMZBznN5vbIaiwOBbPz9sBVGRECYLru9rVUEA1aqefqvmQeAjGT6vKnZRkCL2nN7LFlHw9Bp+fqw2YdByI=';
+        const audio = new Audio(beepData);
+        audio.volume = 0.3;
+        audio.play().catch(() => console.warn('Fallback beep also failed'));
+      } catch (fallbackError) {
+        console.warn('Fallback notification sound failed:', fallbackError);
+      }
     }
   }
 
   /**
-   * Setup real-time notifications via Server-Sent Events
+   * Setup real-time notifications via Socket.io (SSE removed for cleaner architecture)
    */
   setupRealtimeNotifications(adminToken: string) {
-    if (this.eventSource) {
-      this.eventSource.close();
-    }
+    console.log("✅ Real-time notifications using Socket.io are active");
+    
+    this.showToast({
+      title: "🔔 Notifications Active",
+      description: "Real-time alerts enabled for new reports via Socket.io",
+      type: "success",
+    });
 
-    console.log(
-      "Setting up real-time notifications with token:",
-      adminToken.substring(0, 10) + "...",
-    );
+    // Play confirmation sound
+    this.playNotificationSound('success');
+  }
 
-    try {
-      this.eventSource = new EventSource(
-        `/api/notifications/stream?token=${encodeURIComponent(adminToken)}`,
-      );
+  /**
+   * Trigger a new report notification with sound
+   */
+  triggerNewReportNotification(reportData: {
+    reportId: string;
+    category: string;
+    severity: string;
+    priority?: string;
+  }) {
+    const isUrgent = reportData.severity === 'urgent' || 
+                     reportData.priority === 'urgent' ||
+                     reportData.category === 'medical' || 
+                     reportData.category === 'emergency';
 
-      this.eventSource.onopen = () => {
-        console.log("✅ Real-time notifications connected successfully");
-        this.reconnectAttempts = 0;
-        this.showToast({
-          title: "🔔 Notifications Active",
-          description: "Real-time alerts enabled for new reports",
-          type: "success",
-        });
-      };
+    const notificationData = {
+      type: isUrgent ? 'urgent_report' : 'new_report',
+      reportId: reportData.reportId,
+      category: reportData.category,
+      severity: reportData.severity,
+      timestamp: new Date().toISOString(),
+      message: isUrgent ? 'URGENT: Immediate attention required' : 'New report received'
+    };
 
-      this.eventSource.onmessage = (event) => {
-        try {
-          console.log("📨 Notification received:", event.data);
-          const data = JSON.parse(event.data);
-          this.handleNotificationEvent(data);
-        } catch (error) {
-          console.error("Failed to parse notification data:", error);
-        }
-      };
-
-      this.eventSource.onerror = (error) => {
-        console.error("❌ Notification stream error:", error);
-        console.log("EventSource readyState:", this.eventSource?.readyState);
-
-        if (this.eventSource?.readyState === EventSource.CLOSED) {
-          console.log("Connection closed, attempting to reconnect...");
-          this.attemptReconnect(adminToken);
-        }
-      };
-    } catch (error) {
-      console.error("Failed to setup real-time notifications:", error);
-      this.showToast({
-        title: "❌ Notification Setup Failed",
-        description: "Could not connect to real-time notifications",
-        type: "error",
-      });
+    if (isUrgent) {
+      this.handleUrgentReportNotification(notificationData);
+    } else {
+      this.handleNewReportNotification(notificationData);
     }
   }
 
-  private handleNotificationEvent(data: any) {
-    console.log("🔔 Handling notification event:", data);
+  /**
+   * Handle notification events (now public for Socket.io integration)
+   */
+  handleNotificationEvent(data: any) {
+    console.log("🔔 Handling Socket.io notification event:", data);
 
     switch (data.type) {
-      case "connected":
-        console.log("✅ SSE connection established");
-        break;
-      case "heartbeat":
-        // Silent heartbeat
-        break;
       case "new_report":
         this.handleNewReportNotification(data);
         break;
       case "urgent_report":
         this.handleUrgentReportNotification(data);
         break;
+      case "report_updated":
+        this.handleReportUpdateNotification(data);
+        break;
       default:
         console.log("Unknown notification type:", data.type);
+    }
+  }
+
+  private handleReportUpdateNotification(data: any) {
+    const { reportId, status } = data;
+    
+    this.showToast({
+      title: "📝 Report Updated",
+      description: `Report ${reportId} status changed to ${status}`,
+      type: "info",
+      duration: 5000,
+    });
+
+    this.playNotificationSound('default');
+
+    // Refresh report list if callback is set
+    if (this.onNewReportCallback) {
+      this.onNewReportCallback();
     }
   }
 
@@ -199,8 +253,9 @@ export class NotificationService {
       `A new ${category} report has been submitted with ${severity} priority.`,
     );
 
-    // Play notification sound
-    this.playNotificationSound();
+    // Play notification sound based on severity
+    const soundType = severity === 'urgent' ? 'urgent' : 'default';
+    this.playNotificationSound(soundType);
 
     // Update document title for attention
     this.updateDocumentTitle("🚨 New Report");
@@ -245,9 +300,9 @@ export class NotificationService {
   }
 
   private playUrgentSound() {
-    // Play 3 quick beeps for urgent notifications
+    // Play 3 urgent sounds with increasing intensity
     for (let i = 0; i < 3; i++) {
-      setTimeout(() => this.playNotificationSound(), i * 400);
+      setTimeout(() => this.playNotificationSound('urgent'), i * 500);
     }
   }
 
@@ -276,37 +331,11 @@ export class NotificationService {
     }, 1000);
   }
 
-  private attemptReconnect(adminToken: string) {
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      this.reconnectAttempts++;
-      const delay = Math.pow(2, this.reconnectAttempts) * 1000; // Exponential backoff
-
-      console.log(
-        `Attempting to reconnect notifications in ${delay}ms (attempt ${this.reconnectAttempts})`,
-      );
-
-      setTimeout(() => {
-        this.setupRealtimeNotifications(adminToken);
-      }, delay);
-    } else {
-      this.showToast({
-        title: "❌ Notifications Disconnected",
-        description:
-          "Unable to connect to real-time notifications. Please refresh the page.",
-        type: "error",
-        duration: 10000,
-      });
-    }
-  }
-
   /**
-   * Disconnect real-time notifications
+   * Disconnect real-time notifications (Socket.io handled automatically)
    */
   disconnect() {
-    if (this.eventSource) {
-      this.eventSource.close();
-      this.eventSource = null;
-    }
+    console.log("🔇 Notification service disconnected (Socket.io will handle cleanup)");
   }
 
   /**

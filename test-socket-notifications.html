@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Socket.io Notification Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .test-container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .test-button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 15px 25px;
+            margin: 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .test-button:hover {
+            background: #0056b3;
+        }
+        .urgent-button {
+            background: #dc3545;
+        }
+        .urgent-button:hover {
+            background: #c82333;
+        }
+        .log {
+            background: #343a40;
+            color: white;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 14px;
+        }
+        .info {
+            background: #e9ecef;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+    </style>
+    <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+    <div class="test-container">
+        <h1>🧪 Socket.io Notification Test</h1>
+        
+        <div class="info">
+            <strong>Test New Report Notifications with Sound</strong><br>
+            This page will manually trigger Socket.io notifications to test the admin dashboard sound system.
+        </div>
+        
+        <button class="test-button" onclick="testRegularNotification()">
+            🔔 Test Regular Report Notification
+        </button>
+        
+        <button class="test-button urgent-button" onclick="testUrgentNotification()">
+            🚨 Test Urgent Report Notification
+        </button>
+        
+        <button class="test-button" onclick="testSocketConnection()">
+            🔧 Test Socket.io Connection
+        </button>
+        
+        <button class="test-button" onclick="clearLog()">
+            🗑️ Clear Log
+        </button>
+        
+        <div id="log" class="log">
+            🧪 Test logs will appear here...<br>
+        </div>
+    </div>
+
+    <script>
+        let socket = null;
+        
+        function log(message) {
+            const logElement = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            logElement.innerHTML += `[${timestamp}] ${message}<br>`;
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+        
+        function clearLog() {
+            document.getElementById('log').innerHTML = '🧪 Test logs cleared...<br>';
+        }
+        
+        function initSocket() {
+            if (!socket) {
+                log('🔄 Initializing Socket.io connection...');
+                socket = io();
+                
+                socket.on('connect', () => {
+                    log('✅ Connected to Socket.io server');
+                });
+                
+                socket.on('disconnect', () => {
+                    log('❌ Disconnected from Socket.io server');
+                });
+                
+                socket.on('connect_error', (error) => {
+                    log(`❌ Connection error: ${error.message}`);
+                });
+            }
+            return socket;
+        }
+        
+        function testRegularNotification() {
+            log('📨 Testing regular report notification...');
+            const socket = initSocket();
+            
+            const testNotification = {
+                type: 'new_report',
+                data: {
+                    shortId: 'TEST' + Math.random().toString(36).substring(7).toUpperCase(),
+                    priority: 'medium',
+                    timestamp: new Date().toISOString(),
+                    reportType: 'harassment',
+                    location: 'Test Location - Regular Report',
+                    hasMedia: false
+                }
+            };
+            
+            // Simulate what the server sends to admin clients
+            socket.emit('simulate_new_report', testNotification);
+            log(`📤 Sent test notification: ${testNotification.data.shortId}`);
+        }
+        
+        function testUrgentNotification() {
+            log('🚨 Testing urgent report notification...');
+            const socket = initSocket();
+            
+            const urgentNotification = {
+                type: 'new_report',
+                data: {
+                    shortId: 'URGENT' + Math.random().toString(36).substring(7).toUpperCase(),
+                    priority: 'urgent',
+                    timestamp: new Date().toISOString(),
+                    reportType: 'emergency',
+                    location: 'Test Location - URGENT Report',
+                    hasMedia: true
+                }
+            };
+            
+            // Simulate what the server sends to admin clients
+            socket.emit('simulate_new_report', urgentNotification);
+            log(`🚨 Sent urgent test notification: ${urgentNotification.data.shortId}`);
+        }
+        
+        function testSocketConnection() {
+            log('🔧 Testing Socket.io connection status...');
+            const socket = initSocket();
+            
+            if (socket.connected) {
+                log('✅ Socket.io is connected and ready');
+                log(`📊 Socket ID: ${socket.id}`);
+            } else {
+                log('⚠️ Socket.io is not connected');
+            }
+            
+            // Test ping
+            const start = Date.now();
+            socket.emit('ping', start, (response) => {
+                const latency = Date.now() - start;
+                log(`🏓 Ping response received in ${latency}ms`);
+            });
+        }
+        
+        // Initialize on page load
+        log('🧪 Socket.io Notification Test initialized');
+        log('💡 Click buttons above to test different notification types');
+        log('📌 Make sure admin dashboard is open in another tab to hear sounds');
+        
+        // Auto-connect
+        setTimeout(() => {
+            initSocket();
+        }, 1000);
+    </script>
+</body>
+</html>

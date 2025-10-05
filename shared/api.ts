@@ -11,6 +11,28 @@ export interface Report {
   imageFileIds?: string[]; // GridFS file IDs for images
   videoFileIds?: string[]; // GridFS file IDs for videos
   
+  // Server-side file references for GridFS
+  photo_file_id?: string; // Single photo file ID from server
+  video_file_id?: string; // Single video file ID from server
+  files?: {
+    photo?: {
+      id: string;
+      filename: string;
+      contentType: string;
+      size: number;
+      uploadDate: string;
+      url: string;
+    };
+    video?: {
+      id: string;
+      filename: string;
+      contentType: string;
+      size: number;
+      uploadDate: string;
+      url: string;
+    };
+  };
+  
   // Legacy URL fields for backward compatibility
   photo_url?: string;
   video_url?: string;
@@ -21,6 +43,17 @@ export interface Report {
   admin_response?: string;
   admin_response_at?: string;
   severity?: ReportSeverity;
+  
+  // Enhanced admin fields
+  type?: string; // Report type
+  priority?: string; // Priority level
+  updated_at?: string; // Last update timestamp
+  resolved_at?: string; // Resolution timestamp
+  escalated_at?: string; // Escalation timestamp
+  reporter_email?: string; // Reporter email (admin only)
+  admin_notes?: string; // Admin notes
+  admin_comment?: string; // Admin comment
+  
   // Encrypted data fields
   encrypted_data?: EncryptedReportData;
   is_encrypted?: boolean;

@@ -151,8 +151,10 @@ export const createReportWithGridFS = async (req: Request, res: Response): Promi
 
         // Apply AI moderation
         const moderation: ModerationResult | undefined = moderateContent(body.message);
-        if (moderation?.isFlagged) {
-          console.log('🚨 AI moderation flagged content:', moderation.reason);
+        // moderation may be an internal type; allow flexible access
+        const _moderation: any = moderation as any;
+        if (_moderation?.isFlagged) {
+          console.log('🚨 AI moderation flagged content:', _moderation.reason);
         }
 
         // Create report document

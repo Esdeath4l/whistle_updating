@@ -36,16 +36,6 @@ function expressPlugin(): Plugin {
         try {
           const connectDB = (await import("./shared/db")).default;
           await connectDB();
-          
-          // Initialize admin accounts after MongoDB connection
-          const { AdminService } = await import("./server/utils/admin-service");
-          await AdminService.initializeAdminAccounts();
-          
-          // Initialize escalation service
-          const { EscalationService } = await import("./server/utils/escalation-service");
-          EscalationService.initialize();
-          EscalationService.startEscalationMonitoring();
-          
         } catch (error) {
           console.error("❌ MongoDB connection failed in dev mode:", error.message);
           console.log("⚠️  Continuing with in-memory storage for development");
@@ -53,7 +43,18 @@ function expressPlugin(): Plugin {
       })();
       
       const { createServer } = await import("./server");
-      const { app } = createServer();
+      const { app, initializeSocketIO } = createServer();
+      
+      // Initialize Socket.IO for real-time notifications
+      if (server.httpServer && initializeSocketIO) {
+        console.log("🔗 Initializing Socket.IO for real-time notifications...");
+        try {
+          initializeSocketIO(server.httpServer as any);
+          console.log("✅ Socket.IO initialized successfully");
+        } catch (error) {
+          console.error("❌ Failed to initialize Socket.IO:", error);
+        }
+      }
       
       // Add debugging middleware
       app.use((req, res, next) => {

@@ -1,4 +1,5 @@
 import { RequestHandler } from "express";
+import mongoose from "mongoose";
 import {
   CreateReportResponse,
   ReportCategory,
@@ -7,10 +8,11 @@ import {
 import ReportModel from "../../shared/models/report";
 import AlertModel from "../../shared/models/Alert";
 import { uploadFields, getFile, getDecryptedFile } from "../utils/gridfs";
-import { notifyNewReport } from "./notifications";
+import { notifyNewReport } from "../utils/realtime"; // Use Socket.io instead of SSE
 import { processLocationData } from "../utils/location-processor";
 import { sendUrgentReportNotifications } from "../utils/notifications";
 import { broadcastToAdmins } from "../utils/realtime";
+import { classifyReport } from "../utils/ai-classifier";
 
 /**
  * GridFS Report Creation Handler
@@ -53,7 +55,7 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
 
     try {
       console.log("🚀 Processing GridFS report submission");
-      const { message, category, severity, location, share_location, is_offline_sync } = req.body;
+  const { message, category, severity, priority: incomingPriority, location, share_location, is_offline_sync } = req.body;
       const files = req.files as { [fieldname: string]: Express.Multer.File[] };
 
       // Validate required fields
@@ -80,13 +82,13 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
         });
       }
 
-      // Process uploaded files
-      const imageFileIds: string[] = [];
-      const videoFileIds: string[] = [];
+      // Process uploaded files and convert to ObjectId
+      const imageFileIds: mongoose.Types.ObjectId[] = [];
+      const videoFileIds: mongoose.Types.ObjectId[] = [];
 
       if (files.image) {
         files.image.forEach((file: any) => {
-          imageFileIds.push(file.id.toString());
+          imageFileIds.push(new mongoose.Types.ObjectId(file.id.toString()));
           console.log("🖼️ Image uploaded to GridFS:", {
             fileId: file.id,
             filename: file.originalname,
@@ -97,7 +99,7 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
 
       if (files.video) {
         files.video.forEach((file: any) => {
-          videoFileIds.push(file.id.toString());
+          videoFileIds.push(new mongoose.Types.ObjectId(file.id.toString()));
           console.log("🎥 Video uploaded to GridFS:", {
             fileId: file.id,
             filename: file.originalname,
@@ -123,13 +125,21 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
       // Apply AI moderation
       const moderation = moderateContent(message);
 
-      // Create report data
-      const reportData = {
+      // Normalize priority (support incoming 'priority' or legacy 'severity')
+      const normalizedPriority = (incomingPriority || severity || 'medium').toString().toLowerCase();
+      const allowedPriorities = ['low', 'medium', 'high', 'urgent'];
+      const finalPriority = allowedPriorities.includes(normalizedPriority) ? normalizedPriority : 'medium';
+
+      // Create report data using correct model fields and normalize priority/severity
+      const reportData: any = {
         message: message.trim(),
         category,
-        severity: severity || "medium",
-        imageFileIds: imageFileIds.length > 0 ? imageFileIds : undefined,
-        videoFileIds: videoFileIds.length > 0 ? videoFileIds : undefined,
+        priority: finalPriority,
+        severity: finalPriority,
+        // Use the correct model fields for GridFS files
+        photo_file_id: imageFileIds.length > 0 ? imageFileIds[0] : undefined, // Primary image
+        video_file_id: videoFileIds.length > 0 ? videoFileIds[0] : undefined, // Primary video
+        additional_media: [...imageFileIds.slice(1), ...videoFileIds.slice(1)], // Additional files
         location: processedLocation,
         moderation,
         is_offline_sync: is_offline_sync === 'true',
@@ -143,6 +153,16 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
         }]
       };
 
+      // Run AI classification synchronously so high-risk reports are flagged immediately
+      try {
+        const classification = await classifyReport({ message, category: reportData.category, priority: reportData.priority });
+        reportData.ai_classification = classification;
+        if (classification.flagged) reportData.status = 'flagged';
+        console.log('🧠 AI classification (pre-save) for GridFS report:', classification);
+      } catch (aiErr) {
+        console.warn('⚠️ AI classification failed (pre-save) for GridFS report:', aiErr);
+      }
+
       // Save to database
       const report = new ReportModel(reportData);
       const savedReport = await report.save();
@@ -155,15 +175,15 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
       });
 
       // Create alert for urgent reports
-      if (severity === "urgent" || 
-          category === "medical" || 
-          category === "emergency") {
+    if (['urgent', 'high'].includes(reportData.priority) || 
+      category === "medical" || 
+      category === "emergency") {
         
         const alert = new AlertModel({
           reportId: savedReport._id,
           alertType: category === "medical" ? "emergency" : "urgent",
           message: `${severity?.toUpperCase()} ${category.replace("_", " ")} report received`,
-          severity: severity || "high",
+          severity: (severity || reportData.priority) || "high",
           category,
           created_at: new Date(),
         });
@@ -177,14 +197,14 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
             _id: savedReport._id.toString(),
             shortId: savedReport.shortId,
             category,
-            severity: severity || "high",
+            severity: reportData.priority || "high",
             message: savedReport.message,
             location: reportData.location || undefined,
             timestamp: new Date()
           });
-          console.log("📧 Urgent notifications sent successfully");
+          console.log("📧 Urgent/high notifications sent successfully for GridFS report");
         } catch (notifyError) {
-          console.error("❌ Failed to send urgent notifications:", notifyError);
+          console.error("❌ Failed to send urgent/high notifications:", notifyError);
         }
 
         // Broadcast to admin dashboard in real-time
@@ -193,8 +213,9 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
             reportId: savedReport._id.toString(),
             shortId: savedReport.shortId,
             category,
-            severity: severity || "high",
+            severity: reportData.priority || "high",
             message: savedReport.message,
+            ai_classification: savedReport.ai_classification || reportData.ai_classification || null,
             created_at: new Date().toISOString()
           });
           console.log("📡 Real-time broadcast sent to admin dashboard");
@@ -210,7 +231,7 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
             shortId: savedReport.shortId,
             message: savedReport.message,
             category: savedReport.category,
-            severity: savedReport.severity,
+            severity: savedReport.priority || savedReport.severity,
             status: savedReport.status,
             created_at: (savedReport.created_at || savedReport.createdAt)?.toISOString() || new Date().toISOString(),
             updated_at: (savedReport.updated_at || savedReport.updatedAt)?.toISOString() || new Date().toISOString(),
@@ -242,6 +263,17 @@ export const createReportWithGridFS: RequestHandler = async (req, res) => {
           locationAccuracy: savedReport.location?.accuracy
         },
         message: "Report submitted successfully",
+      });
+
+      // Background AI classification - non-blocking
+      setImmediate(async () => {
+        try {
+          const classification = await classifyReport({ message: message || savedReport.message, category, priority: reportData.priority });
+          await ReportModel.findByIdAndUpdate(savedReport._id, { $set: { ai_classification: classification } }).exec();
+          console.log('🧠 AI classification saved for GridFS report', savedReport.shortId, classification);
+        } catch (err) {
+          console.error('❌ Failed to classify/persist GridFS report:', err);
+        }
       });
 
     } catch (error) {

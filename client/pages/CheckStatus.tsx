@@ -323,23 +323,8 @@ export default function CheckStatus() {
                       Location
                     </Label>
                     <div className="text-sm text-muted-foreground">
-                      {(() => {
-                        // Get coordinates from location structure
-                        const lat = reportStatus.location.latitude;
-                        const lng = reportStatus.location.longitude;
-                        
-                        // If we have an address, use it preferentially
-                        if (reportStatus.location.address && reportStatus.location.address.trim() !== '') {
-                          return reportStatus.location.address;
-                        }
-                        
-                        // Otherwise, format coordinates if available
-                        if (lat !== undefined && lng !== undefined && lat !== null && lng !== null) {
-                          return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
-                        }
-                        
-                        return 'Location coordinates unavailable';
-                      })()}
+                      {reportStatus.location.address || 
+                       `${reportStatus.location.latitude?.toFixed(4)}, ${reportStatus.location.longitude?.toFixed(4)}`}
                     </div>
                   </div>
                 )}

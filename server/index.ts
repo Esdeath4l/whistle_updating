@@ -25,20 +25,19 @@ import {
   getAdminReportDetails
 } from "./routes/admin-reports";
 import {
-  markReportAsViewed,
-  markReportAsResolved,
-  getEscalationStats
-} from "./routes/admin-tracking";
+  getAdminReportsWithMedia,
+  getAdminReportDetailsWithMedia
+} from "./routes/admin-reports-enhanced-media";
 import {
-  streamNotifications,
   testEmailNotification,
   sendSMSNotification,
 } from "./utils/notificationHelpers";
+import {
+  pollNotifications,
+  getNotificationStatus,
+  cleanupNotifications
+} from "./routes/notification-polling";
 import { requireAuth, requireAdmin } from "./middleware/authMiddleware";
-import { testNotifications } from "./routes/test-notifications";
-import { AdminService } from "./utils/admin-service";
-import { EscalationService } from "./utils/escalation-service";
-import AdminModel, { AdminRole } from "../shared/models/Admin";
 
 /**
  * Enhanced Whistle Server with JWT Authentication and Security
@@ -155,6 +154,29 @@ export function createServer() {
     }
   });
 
+  // Test escalation route
+  app.post("/test-escalation", async (req, res) => {
+    try {
+      console.log("🚨 Testing escalation functionality...");
+      
+      const { manualEscalationCheck } = await import("./utils/escalation");
+      const result = await manualEscalationCheck();
+      
+      res.json({ 
+        success: true, 
+        message: "Escalation check completed",
+        escalatedReports: result.escalated,
+        totalTracked: result.total
+      });
+    } catch (error) {
+      console.error("Escalation test error:", error);
+      res.status(500).json({ 
+        success: false, 
+        error: error.message 
+      });
+    }
+  });
+
   // Temporary admin setup endpoint (remove in production)
   app.post("/setup-admin", async (req, res) => {
     try {
@@ -177,7 +199,7 @@ export function createServer() {
         username: 'admin',
         password: hashedPassword,
         email: 'admin@whistle.com',
-        role: AdminRole.PRIMARY,
+        role: AdminRole.SUPERADMIN,
         firstName: 'System',
         lastName: 'Administrator',
         isActive: true
@@ -200,6 +222,55 @@ export function createServer() {
     }
   });
 
+  // Development-only helper to emit a sample new_report notification
+  if (process.env.NODE_ENV !== 'production') {
+    app.post('/dev/emit-new-report', async (req, res) => {
+      try {
+        const { notifyNewReport } = await import('./utils/realtime');
+        const sample = {
+          shortId: `DEV${Math.random().toString(36).substr(2, 5).toUpperCase()}`,
+          priority: 'medium',
+          type: 'test',
+          timestamp: new Date().toISOString(),
+          hasMedia: false,
+          description: 'Development test notification',
+          submittedBy: 'dev'
+        };
+
+        notifyNewReport(sample as any);
+        res.json({ success: true, message: 'Dev notification emitted', data: sample });
+      } catch (error) {
+        console.error('Dev emit error:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+    // Dev-only notification health endpoint
+    app.get('/dev/notification-health', async (req, res) => {
+      try {
+        const { getConnectedAdminsCount } = await import('./utils/realtime');
+        const adminCount = await getConnectedAdminsCount();
+
+        const mask = (v: string | undefined) => v ? v.substring(0, 4) + '...' : 'not set';
+
+        res.json({
+          success: true,
+          adminCount,
+          smtp: {
+            user: mask(process.env.SMTP_USER || process.env.EMAIL_USER),
+            configured: !!(process.env.SMTP_USER && process.env.SMTP_PASS)
+          },
+          twilio: {
+            accountSid: mask(process.env.TWILIO_ACCOUNT_SID),
+            authTokenPresent: !!process.env.TWILIO_AUTH_TOKEN
+          }
+        });
+      } catch (error) {
+        console.error('Notification health check failed:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+  }
+
   // Public report routes (API prefix handled by Vite middleware)
   app.post("/reports", createReport); // Unified report creation - /api/reports
   app.post("/reports/with-files", createReportWithGridFS); // Report creation with GridFS file uploads - /api/reports/with-files
@@ -215,22 +286,16 @@ export function createServer() {
   // Public admin authentication routes
   app.post("/admin/login", adminLogin);
 
-  // Test notifications route (admin only)
-  app.get("/test/notifications", requireAuth, requireAdmin, testNotifications);
-
-  // Protected admin routes (JWT required) - apply new middleware
-  app.get("/reports", requireAuth, requireAdmin, getAdminReports); // Get all reports (admin only)
-  app.get("/admin/reports", requireAuth, requireAdmin, getAdminReports); // Alternative admin route
-  app.get("/admin/reports/:id", requireAuth, requireAdmin, getAdminReportDetails); // Get detailed report
+  // Protected admin routes (JWT required) - Enhanced with comprehensive media support
+  app.get("/reports", requireAuth, requireAdmin, getAdminReportsWithMedia); // Enhanced reports with full media
+  app.get("/admin/reports", requireAuth, requireAdmin, getAdminReportsWithMedia); // Enhanced admin route
+  app.get("/admin/reports/:id", requireAuth, requireAdmin, getAdminReportDetailsWithMedia); // Enhanced detailed report
   app.put("/admin/reports/:id", requireAuth, requireAdmin, updateReportStatus); // Update report status
-  
-  // Multi-admin tracking routes
-  app.post("/reports/:id/viewed", requireAuth, requireAdmin, markReportAsViewed); // Mark report as viewed
-  app.post("/reports/:id/resolve", requireAuth, requireAdmin, markReportAsResolved); // Mark report as resolved
-  app.get("/admin/escalation-stats", requireAuth, requireAdmin, getEscalationStats); // Get escalation statistics
 
-  // Protected notification routes (JWT required)
-  app.get("/notifications/stream", requireAuth, requireAdmin, streamNotifications); // Real-time notifications
+  // Protected notification routes (JWT required) - Socket.io only (SSE removed)
+  app.get("/notifications/poll", requireAuth, requireAdmin, pollNotifications); // Polling fallback
+  app.get("/notifications/status", requireAuth, requireAdmin, getNotificationStatus); // Status check
+  app.post("/notifications/cleanup", requireAuth, requireAdmin, cleanupNotifications); // Cleanup
   app.post("/notifications/test-email", requireAuth, requireAdmin, testEmailNotification); // Test email system
 
   // Serve static files in production

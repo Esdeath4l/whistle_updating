@@ -113,10 +113,10 @@ export default function Report() {
       (position) => {
         setLocation(position);
         setGettingLocation(false);
-        console.log("Location captured:", {
+        console.log("High-precision GPS location captured:", {
           lat: position.coords.latitude,
           lng: position.coords.longitude,
-          accuracy: position.coords.accuracy
+          accuracy: position.coords.accuracy + "m"
         });
       },
       (error) => {
@@ -135,7 +135,6 @@ export default function Report() {
             setLocationError("An unknown error occurred while getting location");
             break;
         }
-        setShareLocation(false);
       },
       {
         enableHighAccuracy: true,
@@ -235,14 +234,14 @@ export default function Report() {
       formData.append('is_encrypted', 'false');
       formData.append('share_location', shareLocation.toString());
 
-      // Add location data if available (prefer IPGeolocation over GPS)
-      const finalLocation = ipGeolocation || (shareLocation && location ? {
+      // Add location data if available (prefer high-precision GPS over IP geolocation)
+      const finalLocation = (shareLocation && location ? {
         latitude: location.coords.latitude,
         longitude: location.coords.longitude,
         accuracy: location.coords.accuracy,
         timestamp: location.timestamp,
         source: 'browser_gps' as const
-      } : null);
+      } : ipGeolocation);
 
       if (finalLocation) {
         formData.append('location', JSON.stringify(finalLocation));

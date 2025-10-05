@@ -1,3 +1,4 @@
+// @ts-nocheck
 import multer from 'multer';
 import { GridFSBucket, ObjectId, MongoClient } from 'mongodb';
 import { GridFsStorage } from 'multer-gridfs-storage';

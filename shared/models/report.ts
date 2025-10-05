@@ -78,12 +78,14 @@ export interface IReport extends Document {
   updated_at?: Date; // For backward compatibility
   moderation_result?: any;
   moderation?: any; // For API compatibility
+  // AI classification result (optional)
+  ai_classification?: any;
+  // History of AI classification actions
+  ai_history?: Array<{ at: Date; by: string; action: string; classification: any }>;
+  // Convenience top-level confidentiality score (0-100) and flagged boolean
+  confidentialityScore?: number;
+  flagged?: boolean;
   is_offline_sync?: boolean;
-  
-  // Multi-admin escalation tracking
-  viewedBy: string[]; // Array of admin usernames who have viewed this report
-  resolvedBy?: string; // Username of admin who resolved the report
-  lastEscalationSentAt?: Date; // Timestamp of last escalation email to prevent duplicates
   
   // Timestamps
   createdAt: Date;
@@ -94,9 +96,6 @@ export interface IReport extends Document {
   getDecryptedLocation(): any;
   getDecryptedAdminNotes(): string;
   needsEscalation(): boolean;
-  shouldSendEscalationEmail(): boolean;
-  markViewedBy(adminUsername: string): Promise<IReport>;
-  markResolvedBy(adminUsername: string): Promise<IReport>;
   ageInHours: number;
 }
 
@@ -145,7 +144,7 @@ const reportSchema: Schema<IReport> = new Schema({
   // Admin workflow status
   status: {
     type: String,
-    enum: ['pending', 'in-progress', 'resolved', 'escalated'],
+    enum: ['pending', 'in-progress', 'resolved', 'escalated', 'reviewed', 'flagged'],
     default: 'pending'
   },
 
@@ -335,34 +334,6 @@ const reportSchema: Schema<IReport> = new Schema({
     type: Date
   },
 
-  // Multi-admin escalation tracking fields
-  viewedBy: {
-    type: [String], // Array of admin usernames who have viewed this report
-    default: [],
-    validate: {
-      validator: function(arr: string[]) {
-        return arr.every((username: string) => typeof username === 'string' && username.length > 0);
-      },
-      message: 'viewedBy must be an array of non-empty strings'
-    }
-  },
-
-  resolvedBy: {
-    type: String, // Username of admin who resolved the report
-    default: null,
-    validate: {
-      validator: function(v: string) {
-        return !v || (typeof v === 'string' && v.length > 0);
-      },
-      message: 'resolvedBy must be a non-empty string if provided'
-    }
-  },
-
-  lastEscalationSentAt: {
-    type: Date, // Timestamp of last escalation email to prevent duplicates
-    default: null
-  },
-
   // Admin response fields for API compatibility
   admin_response: {
     type: String
@@ -380,6 +351,25 @@ const reportSchema: Schema<IReport> = new Schema({
   moderation: {
     type: Schema.Types.Mixed
   },
+
+  // AI classification store (rule-based or ML model outputs)
+  ai_classification: {
+    labels: [{ type: String }],
+    primaryLabel: { type: String },
+    confidence: { type: Number },
+    // 0..100 risk/confidentiality score
+    score: { type: Number, min: 0, max: 100, default: 0 },
+    // Flag deduced from score or model
+    flagged: { type: Boolean, default: false },
+    reasons: { type: Schema.Types.Mixed }
+  },
+  // History of AI classification actions (reclassify/unflag)
+  ai_history: [{
+    at: { type: Date, default: Date.now },
+    by: { type: String }, // admin identifier or 'system'
+    action: { type: String }, // 'classify' | 'reclassify' | 'unflag'
+    classification: { type: Schema.Types.Mixed }
+  }],
 
   is_offline_sync: {
     type: Boolean,
@@ -415,92 +405,20 @@ reportSchema.virtual('ageInHours').get(function() {
 });
 
 // Instance method to check if report needs escalation
-// Escalation Logic:
-// 1. If status = pending and no viewedBy entries after 2-3 hours: send escalation email
-// 2. If status != resolved and more than 5-6 hours since creation: send another escalation email
 reportSchema.methods.needsEscalation = function(): boolean {
-  const ageInHours = this.ageInHours;
-  const hasBeenViewed = this.viewedBy && this.viewedBy.length > 0;
-  const isResolved = this.status === 'resolved';
-  
-  // First escalation: pending status with no views after 2-3 hours
-  const needsFirstEscalation = this.status === 'pending' && 
-                              !hasBeenViewed && 
-                              ageInHours >= 2;
-  
-  // Second escalation: not resolved after 5-6 hours
-  const needsSecondEscalation = !isResolved && 
-                               ageInHours >= 5;
-  
-  return needsFirstEscalation || needsSecondEscalation;
-};
-
-// Instance method to check if escalation email should be sent (prevents duplicates)
-reportSchema.methods.shouldSendEscalationEmail = function(): boolean {
-  if (!this.needsEscalation()) {
-    return false;
-  }
-  
-  // Don't send if escalation email was sent recently (within 1 hour)
-  if (this.lastEscalationSentAt) {
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-    if (this.lastEscalationSentAt > oneHourAgo) {
-      return false;
-    }
-  }
-  
-  return true;
-};
-
-// Instance method to mark report as viewed by admin
-reportSchema.methods.markViewedBy = function(adminUsername: string): Promise<IReport> {
-  if (!this.viewedBy.includes(adminUsername)) {
-    this.viewedBy.push(adminUsername);
-    return this.save();
-  }
-  return Promise.resolve(this);
-};
-
-// Instance method to mark report as resolved by admin
-reportSchema.methods.markResolvedBy = function(adminUsername: string): Promise<IReport> {
-  this.status = 'resolved';
-  this.resolvedBy = adminUsername;
-  this.resolved_at = new Date();
-  return this.save();
+  return this.priority === 'urgent' && 
+         this.status === 'pending' && 
+         this.ageInHours >= 2;
 };
 
 // Static method to find reports needing escalation
 reportSchema.statics.findNeedingEscalation = function() {
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-  const fiveHoursAgo = new Date(Date.now() - 5 * 60 * 60 * 1000);
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-  
   return this.find({
-    $and: [
-      // Main escalation conditions
-      {
-        $or: [
-          // First escalation: pending reports with no views after 2+ hours
-          {
-            status: 'pending',
-            viewedBy: { $size: 0 },
-            createdAt: { $lt: twoHoursAgo }
-          },
-          // Second escalation: unresolved reports after 5+ hours
-          {
-            status: { $ne: 'resolved' },
-            createdAt: { $lt: fiveHoursAgo }
-          }
-        ]
-      },
-      // Prevent duplicate escalations within 1 hour
-      {
-        $or: [
-          { lastEscalationSentAt: { $exists: false } },
-          { lastEscalationSentAt: { $lt: oneHourAgo } }
-        ]
-      }
-    ]
+    priority: 'urgent',
+    status: 'pending',
+    createdAt: { $lt: twoHoursAgo },
+    escalated_at: { $exists: false }
   });
 };
 

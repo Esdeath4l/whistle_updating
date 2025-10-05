@@ -73,6 +73,30 @@ router.get('/reports',
         .limit(limitNum)
         .select('-encrypted_data -encryption_iv -encryption_auth_tag');
 
+      // Background: ensure legacy reports have ai_classification.score persisted
+      (async () => {
+        try {
+          const { classifyReport } = await import('../utils/ai-classifier.js');
+          const toProcess = reports.filter((r: any) => !(r.ai_classification && typeof r.ai_classification.score === 'number'));
+          if (toProcess.length === 0) return;
+          console.log(`🔁 Backfilling AI classification for ${toProcess.length} legacy reports`);
+          for (const r of toProcess) {
+            try {
+              const message = typeof r.getDecryptedMessage === 'function' ? r.getDecryptedMessage() : r.message;
+              const classification = await classifyReport({ message, category: r.category, priority: r.priority });
+              await ReportModel.findByIdAndUpdate(r._id, {
+                $set: { ai_classification: classification },
+                $push: { ai_history: { at: new Date(), by: 'system', action: 'backfill', classification } }
+              }).catch(err => console.warn('Backfill update failed for', r._id, err));
+            } catch (err) {
+              console.warn('Failed to classify legacy report', r._id, err);
+            }
+          }
+        } catch (err) {
+          console.warn('AI backfill failed (classifier import or run error):', err);
+        }
+      })();
+
       const totalReports = await ReportModel.countDocuments(filter);
       const totalPages = Math.ceil(totalReports / limitNum);
 
@@ -225,6 +249,67 @@ router.put('/reports/:id',
         error: 'Failed to update report',
         message: 'An error occurred while updating the report'
       });
+    }
+  }
+);
+
+/**
+ * Re-run AI classification for a report and persist results
+ * POST /api/admin/reports/:id/reclassify
+ */
+router.post('/reports/:id/reclassify',
+  authenticateAdmin,
+  requirePermission('can_view_reports'),
+  async (req: AuthRequest, res) => {
+    try {
+      const report = await ReportModel.findById(req.params.id);
+      if (!report) {
+        return res.status(404).json({ success: false, error: 'Report not found' });
+      }
+
+      // Lazy import classifier to avoid circular deps
+      const { classifyReport } = await import('../utils/ai-classifier.js');
+
+      const message = report.getDecryptedMessage ? report.getDecryptedMessage() : report.message;
+      const classification = await classifyReport({ message, category: report.category, priority: report.priority });
+
+      // Append to ai_history
+      report.ai_history = report.ai_history || [];
+      report.ai_history.push({ at: new Date(), by: req.adminUser?.email || 'admin', action: 'reclassify', classification });
+      report.ai_classification = classification as any;
+      if ((classification as any).flagged) report.status = 'flagged';
+      await report.save();
+
+      res.json({ success: true, data: report });
+    } catch (error) {
+      console.error('❌ Reclassification failed:', error);
+      res.status(500).json({ success: false, error: 'Reclassification failed' });
+    }
+  }
+);
+
+/**
+ * Unflag a report (admin action)
+ * POST /api/admin/reports/:id/unflag
+ */
+router.post('/reports/:id/unflag',
+  authenticateAdmin,
+  requirePermission('can_resolve_reports'),
+  async (req: AuthRequest, res) => {
+    try {
+      const report = await ReportModel.findById(req.params.id);
+      if (!report) return res.status(404).json({ success: false, error: 'Report not found' });
+
+      report.status = 'in-progress';
+      report.ai_history = report.ai_history || [];
+      report.ai_history.push({ at: new Date(), by: req.adminUser?.email || 'admin', action: 'unflag', classification: report.ai_classification || null });
+      if (report.ai_classification) report.ai_classification.flagged = false;
+      await report.save();
+
+      res.json({ success: true, data: report });
+    } catch (err) {
+      console.error('❌ Unflag failed:', err);
+      res.status(500).json({ success: false, error: 'Unflag failed' });
     }
   }
 );

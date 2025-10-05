@@ -24,7 +24,9 @@ interface QRCodeGeneratorProps {
 
 export default function QRCodeGenerator({ reportUrl }: QRCodeGeneratorProps) {
   const [showQR, setShowQR] = useState(false);
-  const currentUrl = reportUrl || `${window.location.origin}/report`;
+  // Use environment variable for QR code redirect, fallback to provided URL or current origin
+  const qrRedirectUrl = import.meta.env.VITE_REPORTS_PAGE_URL || `${window.location.origin}`;
+  const currentUrl = reportUrl || qrRedirectUrl;
 
   const downloadQR = () => {
     const svg = document.getElementById("qr-code") as unknown as SVGElement | null;
