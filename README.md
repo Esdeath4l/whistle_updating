@@ -4,11 +4,10 @@ A secure, anonymous reporting platform built for hackathons, workspaces, and eve
 
 ## 🏆 Award-Winning Features
 
-- **🔐 End-to-End Encryption** - Military-grade AES-256 encryption
+- **🔐 End-to-End Encryption** - End to Encryption is been provided
 - **📱 QR Code Access** - Zero-friction reporting via QR codes
 - **⚡ Real-time Alerts** - Instant admin notifications
 - **🛡️ 100% Anonymous** - No personal data collection
-- **🎯 Smart Categorization** - AI-powered severity detection
 - **📊 Admin Dashboard** - Professional report management
 
 ## 🚀 Quick Start
@@ -39,7 +38,6 @@ npm start
 - Anonymous session management
 - Encrypted data storage
 - No IP or device tracking
-- GDPR/CCPA compliant
 
 ## 📱 Usage
 
